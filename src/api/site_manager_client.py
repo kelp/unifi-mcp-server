@@ -200,17 +200,19 @@ class SiteManagerClient:
         """
         return await self.get(endpoint, params=params)
 
-    async def list_sites(self, limit: int | None = None, offset: int | None = None) -> JSONBody:
+    async def list_sites(
+        self, page_size: int | None = None, next_token: str | None = None
+    ) -> JSONBody:
         """List all sites from Site Manager API.
 
         Args:
-            limit: Maximum number of sites to return
-            offset: Number of sites to skip
+            page_size: Number of sites per page (spec ``pageSize``)
+            next_token: Token from the previous page (spec ``nextToken``)
 
         Returns:
-            Response with sites list
+            Response with sites list and, when more pages exist, ``nextToken``
         """
-        params = {"limit": limit, "offset": offset}
+        params = {"pageSize": page_size, "nextToken": next_token}
         return await self._get_object(
             "sites", params={k: v for k, v in params.items() if v is not None}
         )
@@ -254,41 +256,47 @@ class SiteManagerClient:
         return await self._get_object("vantage-points")
 
     # ISP Metrics endpoints (added 2026-02-16)
-    async def get_isp_metrics(self, site_id: str) -> JSONBody:
-        """Get ISP metrics for a site.
+    async def get_isp_metrics(
+        self,
+        metric_type: str,
+        begin_timestamp: str | None = None,
+        end_timestamp: str | None = None,
+        duration: str | None = None,
+    ) -> JSONBody:
+        """Get ISP metrics for every site on the account (GET isp-metrics/{type}).
 
         Args:
-            site_id: Site identifier
+            metric_type: Interval, ``5m`` or ``1h``
+            begin_timestamp: Earliest time (RFC3339)
+            end_timestamp: Latest time (RFC3339)
+            duration: ``24h`` for 5m, ``7d`` or ``30d`` for 1h. Not with timestamps.
 
         Returns:
             ISP metrics data
         """
-        return await self._get_object(f"sites/{site_id}/isp/metrics")
+        params = {
+            "beginTimestamp": begin_timestamp,
+            "endTimestamp": end_timestamp,
+            "duration": duration,
+        }
+        return await self._get_object(
+            f"isp-metrics/{metric_type}",
+            params={k: v for k, v in params.items() if v is not None},
+        )
 
-    async def query_isp_metrics(
-        self,
-        site_id: str | None = None,
-        start_time: str | None = None,
-        end_time: str | None = None,
-    ) -> JSONBody:
-        """Query ISP metrics with filters.
+    async def query_isp_metrics(self, metric_type: str, sites: list[dict[str, Any]]) -> JSONBody:
+        """Query ISP metrics for given sites (POST isp-metrics/{type}/query).
+
+        The POST reads only; it changes nothing on the account.
 
         Args:
-            site_id: Optional site identifier (None for all sites)
-            start_time: Optional start time (ISO format)
-            end_time: Optional end time (ISO format)
+            metric_type: Interval, ``5m`` or ``1h``
+            sites: ``[{"hostId", "siteId", "beginTimestamp"?, "endTimestamp"?}]``
 
         Returns:
             ISP metrics query results
         """
-        params = {
-            "site_id": site_id,
-            "start_time": start_time,
-            "end_time": end_time,
-        }
-        return await self._get_object(
-            "isp/metrics", params={k: v for k, v in params.items() if v is not None}
-        )
+        return await self.post(f"isp-metrics/{metric_type}/query", json_data={"sites": sites})
 
     # SD-WAN endpoints (added 2026-02-16)
     async def list_sdwan_configs(self) -> JSONBody:
@@ -297,7 +305,7 @@ class SiteManagerClient:
         Returns:
             Response with SD-WAN configurations list
         """
-        return await self._get_object("sdwan/configs")
+        return await self._get_object("sd-wan-configs")
 
     async def get_sdwan_config(self, config_id: str) -> JSONBody:
         """Get SD-WAN configuration by ID.
@@ -308,7 +316,7 @@ class SiteManagerClient:
         Returns:
             SD-WAN configuration data
         """
-        return await self._get_object(f"sdwan/configs/{config_id}")
+        return await self._get_object(f"sd-wan-configs/{config_id}")
 
     async def get_sdwan_config_status(self, config_id: str) -> JSONBody:
         """Get SD-WAN configuration deployment status.
@@ -319,22 +327,52 @@ class SiteManagerClient:
         Returns:
             SD-WAN configuration status data
         """
-        return await self._get_object(f"sdwan/configs/{config_id}/status")
+        return await self._get_object(f"sd-wan-configs/{config_id}/status")
 
     # Host Management endpoints (added 2026-02-16)
-    async def list_hosts(self, limit: int | None = None, offset: int | None = None) -> JSONBody:
+    async def list_hosts(
+        self, page_size: int | None = None, next_token: str | None = None
+    ) -> JSONBody:
         """List all managed hosts/consoles.
 
         Args:
-            limit: Maximum number of hosts to return
-            offset: Number of hosts to skip
+            page_size: Number of hosts per page (spec ``pageSize``)
+            next_token: Token from the previous page (spec ``nextToken``)
 
         Returns:
-            Response with hosts list
+            Response with hosts list and, when more pages exist, ``nextToken``
         """
-        params = {"limit": limit, "offset": offset}
+        params = {"pageSize": page_size, "nextToken": next_token}
         return await self._get_object(
             "hosts", params={k: v for k, v in params.items() if v is not None}
+        )
+
+    async def list_devices(
+        self,
+        host_ids: list[str] | None = None,
+        time: str | None = None,
+        page_size: int | None = None,
+        next_token: str | None = None,
+    ) -> JSONBody:
+        """List devices grouped by host (spec ``GET /v1/devices``).
+
+        Args:
+            host_ids: Only these hosts (spec ``hostIds[]``, repeated)
+            time: Last processed timestamp, RFC 3339 (spec ``time``)
+            page_size: Items per page (spec ``pageSize``)
+            next_token: Token from the previous page (spec ``nextToken``)
+
+        Returns:
+            Response with one entry per host and, when more pages exist, ``nextToken``
+        """
+        params: dict[str, Any] = {
+            "hostIds[]": list(host_ids) if host_ids else None,
+            "time": time,
+            "pageSize": page_size,
+            "nextToken": next_token,
+        }
+        return await self._get_object(
+            "devices", params={k: v for k, v in params.items() if v is not None}
         )
 
     async def get_host(self, host_id: str) -> JSONBody:

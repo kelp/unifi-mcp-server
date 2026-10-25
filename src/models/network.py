@@ -42,6 +42,17 @@ class Network(BaseModel):
     ipv6_interface_type: str | None = Field(None, description="IPv6 interface type")
     ipv6_pd_start: str | None = Field(None, description="IPv6 prefix delegation start")
     ipv6_pd_stop: str | None = Field(None, description="IPv6 prefix delegation stop")
+    ipv6_ra_enabled: bool | None = Field(None, description="IPv6 router advertisement enabled")
+    ipv6_ra_priority: str | None = Field(None, description="IPv6 router advertisement priority")
+    ipv6_pd_interface: str | None = Field(None, description="WAN that delegates the IPv6 prefix")
+    ipv6_pd_prefixid: str | None = Field(None, description="IPv6 delegated prefix ID")
+    ipv6_subnets: list[str] | None = Field(None, description="Static IPv6 subnets")
+    ipv6_setting_preference: str | None = Field(None, description="IPv6 setting preference")
+    dhcpdv6_enabled: bool | None = Field(None, description="DHCPv6 server enabled")
+    dhcpdv6_start: str | None = Field(None, description="DHCPv6 range start")
+    dhcpdv6_stop: str | None = Field(None, description="DHCPv6 range end")
+    dhcpdv6_leasetime: int | None = Field(None, description="DHCPv6 lease time in seconds")
+    dhcpdv6_dns_auto: bool | None = Field(None, description="DHCPv6 DNS servers set automatically")
 
     # Site association
     site_id: str | None = Field(None, description="Site ID")

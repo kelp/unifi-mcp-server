@@ -133,7 +133,7 @@ A new entry point `python -m src.worker` (same image, different command):
 | Tier | Which tools | Source |
 |---|---|---|
 | `read` | Everything `is_mutating_tool()` says is not mutating | Registry (exists today) |
-| `write` | Mutating tools | `is_mutating_tool()`: the tool's `@write_tool` declaration (`src/utils/tool_kind.py`) |
+| `write` | Mutating tools, and the read tools that return camera media or stream URLs | `is_mutating_tool()`: the tool's `@write_tool` declaration (`src/utils/tool_kind.py`), plus the `SENSITIVE_READ_TOOLS` list |
 | `destructive` | Mutating tools that delete, restore, re-image or lock out: `delete_*`, `remove_*`, `restore_backup`, `upgrade_device`, `block_client` and similar | A new explicit `DESTRUCTIVE_TOOLS` list |
 | `fleet-admin` | Controller registry, token, and audit management tools | Declared by the fleet/admin modules |
 

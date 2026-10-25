@@ -74,6 +74,8 @@ Copy `update_protect_relay` in `src/tools/protect_relays.py`. The order is fixed
 
 Do not write audit code; the registry wrapper audits every mutating call. A tool with a risky word in its name (`disable`, `reset` and others) must be in `DESTRUCTIVE_TOOLS` (`src/tool_registry.py`) or in `RISKY_NAME_EXEMPTIONS` (`tests/unit/fleet/test_tiers.py`).
 
+A read tool that returns camera images, stream URLs or another way to get live video goes into `SENSITIVE_READ_TOOLS` (`src/tool_registry.py`). It stays `@read_tool`, but it gets the `write` tier, so the viewer role cannot call it. `get_protect_camera_snapshot` and `get_protect_camera_rtsps_streams` are in that set.
+
 ## Response shapes
 
 | Kind | Return |
@@ -97,7 +99,7 @@ Do not write audit code; the registry wrapper audits every mutating call. A tool
 
 - The spec baseline is Protect v7.3.68 (`scripts/protect-api-spec-v7.3.68.json`). Check an endpoint there before you call it.
 - The Phase 5a write paths are tested against mocks only; nobody has verified them on hardware. Say so when you change one.
-- `get_protect_arm_profile` calls a GET path that is not in the v7.3.68 spec, so it may return 404.
+- `get_protect_arm_profile` reads the arm profile list and filters it, because the spec has no GET on `arm-profiles/{id}`.
 - `docs/UNIFI_API.md` still calls Protect v7 "planned" near its start, which contradicts its later Phase 5a section.
 
 ## Known defects (not fixed)

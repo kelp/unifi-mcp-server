@@ -10,9 +10,6 @@ from ..models.site_manager import (
     CrossSiteSearchResult,
     CrossSiteStatistics,
     InternetHealthMetrics,
-    ISPMetrics,
-    SDWANConfig,
-    SDWANConfigStatus,
     SiteHealthSummary,
     SiteInventory,
     SitePerformanceMetrics,
@@ -20,7 +17,7 @@ from ..models.site_manager import (
     VersionControl,
 )
 from ..utils import get_logger, sanitize_log_message
-from ..utils.exceptions import ResourceNotFoundError
+from ..utils.exceptions import ResourceNotFoundError, ValidationError
 from ..utils.tool_kind import read_tool
 
 logger = get_logger(__name__)
@@ -577,74 +574,142 @@ async def search_across_sites(
         return search_result.model_dump()
 
 
-# ISP Metrics Tools (added 2026-02-16)
+# ISP Metrics Tools (spec: GET /v1/isp-metrics/{type}, POST .../query)
+_ISP_DURATIONS = {"5m": {"24h"}, "1h": {"7d", "30d"}}
+
+
+def _validate_isp_interval(interval: str) -> None:
+    if interval not in _ISP_DURATIONS:
+        raise ValidationError(f"interval must be '5m' or '1h', got {interval!r}")
+
+
+def _unwrap_data(response: Any) -> Any:
+    """Return the spec ``data`` member, or the reply itself when it is bare."""
+    if isinstance(response, dict) and "data" in response:
+        return response["data"]
+    return response
+
+
 @read_tool
 @require_site_manager
-async def get_isp_metrics(settings: Settings, site_id: str) -> dict[str, Any]:
-    """Get ISP metrics for a specific site.
+async def get_isp_metrics(
+    settings: Settings,
+    site_id: str | None = None,
+    interval: str = "5m",
+    duration: str | None = None,
+    begin_timestamp: str | None = None,
+    end_timestamp: str | None = None,
+) -> dict[str, Any]:
+    """Get ISP (WAN) metrics for the sites on this UI account.
+
+    The API returns every site linked to the API key. 5-minute data is kept
+    for at least 24 hours and 1-hour data for at least 30 days.
 
     Args:
         settings: Application settings
-        site_id: Site identifier
+        site_id: Optional Site Manager site ID; keeps only that site's entries
+        interval: ``5m`` or ``1h``
+        duration: ``24h`` (5m) or ``7d``/``30d`` (1h). Not with timestamps.
+        begin_timestamp: Earliest time, RFC3339
+        end_timestamp: Latest time, RFC3339
 
     Returns:
-        ISP metrics data including bandwidth, latency, jitter, and packet loss
+        ``{"interval", "count", "data"}``. Each entry has ``metricType``,
+        ``hostId``, ``siteId`` and ``periods[]`` with ``data.wan``
+        (``avgLatency``, ``maxLatency``, ``download_kbps``, ``upload_kbps``,
+        ``packetLoss``, ``uptime``, ``downtime``, ``ispName``, ``ispAsn``).
     """
+    _validate_isp_interval(interval)
+    if duration is not None:
+        if begin_timestamp is not None or end_timestamp is not None:
+            raise ValidationError("duration cannot be used with begin_timestamp or end_timestamp")
+        if duration not in _ISP_DURATIONS[interval]:
+            allowed = ", ".join(sorted(_ISP_DURATIONS[interval]))
+            raise ValidationError(f"duration for interval {interval} must be one of: {allowed}")
+
     async with SiteManagerClient(settings) as client:
-        logger.info(sanitize_log_message(f"Retrieving ISP metrics for site: {site_id}"))
-
+        logger.info(sanitize_log_message(f"Retrieving {interval} ISP metrics (site={site_id})"))
         try:
-            response = await client.get_isp_metrics(site_id)
-            if isinstance(response, list):
-                data = response[0] if response else {}
-            else:
-                _raw = response.get("data", response)
-                data = _raw[0] if isinstance(_raw, list) else _raw
-
-            return ISPMetrics(**data).model_dump()
+            response = await client.get_isp_metrics(
+                interval,
+                begin_timestamp=begin_timestamp,
+                end_timestamp=end_timestamp,
+                duration=duration,
+            )
         except ResourceNotFoundError:
-            logger.warning("isp/metrics endpoint not available on this Site Manager API")
-            return {"error": "isp/metrics endpoint not available", "site_id": site_id}
+            logger.warning("isp-metrics endpoint not available on this Site Manager API")
+            return {"error": "isp-metrics endpoint not available", "site_id": site_id}
+
+    data = _unwrap_data(response)
+    entries = [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
+    if site_id is not None:
+        entries = [e for e in entries if e.get("siteId") == site_id]
+    return {"interval": interval, "count": len(entries), "data": entries}
 
 
 @read_tool
 @require_site_manager
 async def query_isp_metrics(
     settings: Settings,
-    site_id: str | None = None,
+    site_id: str,
+    host_id: str,
+    interval: str = "5m",
     start_time: str | None = None,
     end_time: str | None = None,
-) -> list[dict[str, Any]]:
-    """Query ISP metrics with optional filters.
+) -> dict[str, Any]:
+    """Query ISP (WAN) metrics for one site.
 
     Args:
         settings: Application settings
-        site_id: Optional site identifier (None for all sites)
-        start_time: Optional start time in ISO format (e.g., "2026-02-01T00:00:00Z")
-        end_time: Optional end time in ISO format
+        site_id: Site Manager site ID (``siteId`` from ``list_all_sites_aggregated``)
+        host_id: Console host ID that owns the site (from ``list_hosts``)
+        interval: ``5m`` or ``1h``
+        start_time: Optional start, RFC3339 (e.g. "2026-02-01T00:00:00Z")
+        end_time: Optional end, RFC3339
 
     Returns:
-        List of ISP metrics matching the query
+        ``{"interval", "count", "data", "status", "message"}``. ``status`` is
+        ``partialSuccess`` when the account can read only some sites.
     """
+    _validate_isp_interval(interval)
+    site: dict[str, Any] = {"hostId": host_id, "siteId": site_id}
+    if start_time is not None:
+        site["beginTimestamp"] = start_time
+    if end_time is not None:
+        site["endTimestamp"] = end_time
+
     async with SiteManagerClient(settings) as client:
         logger.info(
             sanitize_log_message(
-                f"Querying ISP metrics (site_id={site_id}, start={start_time}, end={end_time})"
+                f"Querying {interval} ISP metrics (site_id={site_id}, host_id={host_id})"
             )
         )
+        response = await client.query_isp_metrics(interval, [site])
 
-        response = await client.query_isp_metrics(site_id, start_time, end_time)
-        data = response if isinstance(response, list) else response.get("data", response)
+    data = _unwrap_data(response)
+    if isinstance(data, dict):
+        metrics = data.get("metrics") or []
+        status, message = data.get("status"), data.get("message")
+    else:
+        metrics = data if isinstance(data, list) else []
+        status = message = None
+    return {
+        "interval": interval,
+        "count": len(metrics),
+        "data": metrics,
+        "status": status,
+        "message": message,
+    }
 
-        # Handle both single result and list of results
-        if isinstance(data, list):
-            return [ISPMetrics(**item).model_dump() for item in data]
-        if isinstance(data, dict):
-            return [ISPMetrics(**data).model_dump()]
-        return []
+
+# SD-WAN Configuration Tools (spec: /v1/sd-wan-configs)
+def _unwrap_object(response: Any) -> dict[str, Any]:
+    data = _unwrap_data(response)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return data if isinstance(data, dict) else {}
 
 
-# SD-WAN Configuration Tools (added 2026-02-16)
 @read_tool
 @require_site_manager
 async def list_sdwan_configs(settings: Settings) -> list[dict[str, Any]]:
@@ -654,26 +719,19 @@ async def list_sdwan_configs(settings: Settings) -> list[dict[str, Any]]:
         settings: Application settings
 
     Returns:
-        List of SD-WAN configurations
+        List of SD-WAN configurations: ``id``, ``name``, ``type`` (``sdwan-hbsp``)
     """
     async with SiteManagerClient(settings) as client:
         logger.info("Retrieving SD-WAN configurations")
 
         try:
             response = await client.list_sdwan_configs()
-            data = (
-                response
-                if isinstance(response, list)
-                else response.get("data", response.get("configs", []))
-            )
-
-            if isinstance(data, list):
-                return [SDWANConfig(**config).model_dump() for config in data]
-            else:
-                return []
         except ResourceNotFoundError:
-            logger.warning("sdwan/configs endpoint not available on this Site Manager API")
+            logger.warning("sd-wan-configs endpoint not available on this Site Manager API")
             return []
+
+    data = _unwrap_data(response)
+    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
 
 
 @read_tool
@@ -686,19 +744,14 @@ async def get_sdwan_config(settings: Settings, config_id: str) -> dict[str, Any]
         config_id: Configuration identifier
 
     Returns:
-        SD-WAN configuration details
+        SD-WAN configuration: ``id``, ``name``, ``type``, ``variant``
+        (distributed, failover, single), ``settings``, ``hubs[]``, ``spokes[]``
     """
     async with SiteManagerClient(settings) as client:
         logger.info(sanitize_log_message(f"Retrieving SD-WAN configuration: {config_id}"))
-
         response = await client.get_sdwan_config(config_id)
-        if isinstance(response, list):
-            data = response[0] if response else {}
-        else:
-            _raw = response.get("data", response)
-            data = _raw[0] if isinstance(_raw, list) else _raw
 
-        return SDWANConfig(**data).model_dump()
+    return _unwrap_object(response)
 
 
 @read_tool
@@ -711,51 +764,83 @@ async def get_sdwan_config_status(settings: Settings, config_id: str) -> dict[st
         config_id: Configuration identifier
 
     Returns:
-        SD-WAN configuration deployment status
+        Deployment status: ``id``, ``fingerprint``, ``updatedAt``, ``hubs[]``
+        with per-hub progress and errors
     """
     async with SiteManagerClient(settings) as client:
         logger.info(sanitize_log_message(f"Retrieving SD-WAN configuration status: {config_id}"))
-
         response = await client.get_sdwan_config_status(config_id)
-        if isinstance(response, list):
-            data = response[0] if response else {}
-        else:
-            _raw = response.get("data", response)
-            data = _raw[0] if isinstance(_raw, list) else _raw
 
-        return SDWANConfigStatus(**data).model_dump()
+    return _unwrap_object(response)
 
 
-# Host Management Tools (added 2026-02-16)
+# Host Management Tools (spec pagination: pageSize, nextToken)
 @read_tool
 @require_site_manager
 async def list_hosts(
-    settings: Settings, limit: int | None = None, offset: int | None = None
-) -> list[dict[str, Any]]:
+    settings: Settings, page_size: int | None = None, next_token: str | None = None
+) -> dict[str, Any]:
     """List all managed hosts/consoles.
 
     Args:
         settings: Application settings
-        limit: Optional maximum number of hosts to return
-        offset: Optional number of hosts to skip (for pagination)
+        page_size: Optional number of hosts per page
+        next_token: Optional ``next_token`` from the previous page
 
     Returns:
-        List of managed hosts
+        ``{"count", "data", "next_token"}``. ``next_token`` is None on the
+        last page.
     """
     async with SiteManagerClient(settings) as client:
-        logger.info(sanitize_log_message(f"Retrieving hosts list (limit={limit}, offset={offset})"))
+        logger.info(sanitize_log_message(f"Retrieving hosts list (page_size={page_size})"))
+        response = await client.list_hosts(page_size=page_size, next_token=next_token)
 
-        response = await client.list_hosts(limit, offset)
-        data = (
-            response
-            if isinstance(response, list)
-            else response.get("data", response.get("hosts", []))
+    data = _unwrap_data(response)
+    if not isinstance(data, list) and isinstance(response, dict):
+        data = response.get("hosts", [])
+    hosts = data if isinstance(data, list) else []
+    token = response.get("nextToken") if isinstance(response, dict) else None
+    return {"count": len(hosts), "data": hosts, "next_token": token}
+
+
+@read_tool
+@require_site_manager
+async def list_site_manager_devices(
+    settings: Settings,
+    host_ids: list[str] | None = None,
+    time: str | None = None,
+    page_size: int | None = None,
+    next_token: str | None = None,
+) -> dict[str, Any]:
+    """List UniFi devices across all hosts the API key's account owns.
+
+    Each entry is one host: ``hostId``, ``hostName``, ``updatedAt`` and
+    ``devices`` (``id``, ``mac``, ``name``, ``model``, ``ip``,
+    ``productLine``, ``status``, ``version``, ``firmwareStatus``,
+    ``updateAvailable`` and more).
+
+    Args:
+        settings: Application settings
+        host_ids: Only list devices of these host IDs (from list_hosts)
+        time: Only devices processed after this RFC 3339 timestamp
+        page_size: Optional number of hosts per page
+        next_token: Optional ``next_token`` from the previous page
+
+    Returns:
+        ``{"count", "device_count", "data", "next_token"}``. ``count`` is
+        the number of hosts and ``device_count`` the number of devices.
+    """
+    async with SiteManagerClient(settings) as client:
+        logger.info(sanitize_log_message("Retrieving Site Manager devices"))
+        response = await client.list_devices(
+            host_ids=host_ids, time=time, page_size=page_size, next_token=next_token
         )
 
-        if isinstance(data, list):
-            return data
-        else:
-            return []
+    data = _unwrap_data(response)
+    hosts = [h for h in data if isinstance(h, dict)] if isinstance(data, list) else []
+    device_count = sum(len(h.get("devices") or []) for h in hosts)
+    token = response.get("nextToken") if isinstance(response, dict) else None
+    return {"count": len(hosts), "device_count": device_count, "data": hosts, "next_token": token}
 
 
 @read_tool

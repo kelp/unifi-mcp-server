@@ -6,6 +6,8 @@ from ..api import UniFiClient
 from ..config import Settings
 from ..utils import (
     ResourceNotFoundError,
+    ValidationError,
+    coerce_bool,
     get_logger,
     log_audit,
     sanitize_log_message,
@@ -411,6 +413,59 @@ async def authorize_guest(
             site_id=site_id,
         )
         raise
+
+
+@write_tool
+async def unauthorize_guest(
+    site_id: str,
+    client_id: str,
+    settings: Settings,
+    confirm: bool | str = False,
+    dry_run: bool | str = False,
+) -> dict[str, Any]:
+    """Revoke a guest client's network access (UNAUTHORIZE_GUEST_ACCESS).
+
+    The guest loses access until it is authorized again. Uses the same
+    ``/clients/{id}/actions`` route as authorize_guest.
+
+    Args:
+        site_id: Site identifier
+        client_id: Client MAC address or Integration API client UUID
+        settings: Application settings
+        confirm: Must be true to revoke access (required unless dry_run)
+        dry_run: Preview without sending the request
+
+    Returns:
+        {"success", "client_id", "revoked_authorization"}
+    """
+    validate_confirmation(confirm, "unauthorize guest", dry_run)
+    site_id = validate_site_id(site_id)
+    client_id = (client_id or "").strip()
+    if not client_id:
+        raise ValidationError("client_id must not be empty")
+
+    payload = {"action": "UNAUTHORIZE_GUEST_ACCESS"}
+    if coerce_bool(dry_run):
+        return {
+            "dry_run": True,
+            "operation": "unauthorize_guest",
+            "client_id": client_id,
+            "payload": payload,
+        }
+
+    async with UniFiClient(settings) as client:
+        await client.authenticate()
+        response = await client.post(
+            f"/integration/v1/sites/{site_id}/clients/{client_id}/actions",
+            json_data=payload,
+        )
+
+    get_logger(__name__, settings.log_level).info(
+        sanitize_log_message(f"Unauthorized guest client '{client_id}' in site '{site_id}'")
+    )
+    data = response.get("data", response) if isinstance(response, dict) else {}
+    revoked = data.get("revokedAuthorization") if isinstance(data, dict) else None
+    return {"success": True, "client_id": client_id, "revoked_authorization": revoked}
 
 
 @write_tool

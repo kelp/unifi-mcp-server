@@ -219,6 +219,44 @@ class TestProtectClientHttp:
         assert seen[0].method == "DELETE"
 
     @pytest.mark.asyncio
+    async def test_no_content_reply_returns_none(self, mock_settings):
+        """DELETE cameras/{id}/rtsps-stream answers 204 with no body."""
+        seen, handler = _recorder(status=204, content=b"")
+        client = _mock_transport_client(mock_settings, handler)
+
+        result = await client.delete(
+            "cameras/x/rtsps-stream", params={"qualities": ["high", "low"]}
+        )
+
+        assert result is None
+        assert seen[0].url.params.get_list("qualities") == ["high", "low"]
+
+    @pytest.mark.asyncio
+    async def test_get_bytes_returns_body_and_type(self, mock_settings):
+        """GET cameras/{id}/snapshot answers image/jpeg, not JSON."""
+        seen, handler = _recorder(content=b"\xff\xd8", headers={"content-type": "image/jpeg"})
+        client = _mock_transport_client(mock_settings, handler)
+
+        body, content_type = await client.get_bytes(
+            "cameras/x/snapshot", params={"highQuality": "true"}
+        )
+
+        assert body == b"\xff\xd8"
+        assert content_type == "image/jpeg"
+        assert seen[0].method == "GET"
+        assert seen[0].url.params["highQuality"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_get_bytes_error_status_raises(self, mock_settings):
+        from src.utils.exceptions import APIError
+
+        _, handler = _recorder(status=404, text="not found")
+        client = _mock_transport_client(mock_settings, handler)
+
+        with pytest.raises(APIError, match=r"\(404\)"):
+            await client.get_bytes("cameras/x/snapshot")
+
+    @pytest.mark.asyncio
     async def test_error_status_raises_api_error(self, mock_settings):
         from src.utils.exceptions import APIError
 

@@ -234,28 +234,50 @@ class TestEndpoints:
         [
             (lambda c: c.list_sites(), "/v1/sites", {}),
             (
-                lambda c: c.list_sites(limit=10, offset=20),
+                lambda c: c.list_sites(page_size=10, next_token="t2"),
                 "/v1/sites",
-                {"limit": "10", "offset": "20"},
+                {"pageSize": "10", "nextToken": "t2"},
             ),
             (lambda c: c.get_site_health(), "/v1/sites/health", {}),
             (lambda c: c.get_site_health("s1"), "/v1/sites/s1/health", {}),
             (lambda c: c.get_internet_health(), "/v1/internet/health", {}),
             (lambda c: c.get_internet_health("s1"), "/v1/sites/s1/internet/health", {}),
             (lambda c: c.list_vantage_points(), "/v1/vantage-points", {}),
-            (lambda c: c.get_isp_metrics("s1"), "/v1/sites/s1/isp/metrics", {}),
-            (lambda c: c.query_isp_metrics(), "/v1/isp/metrics", {}),
+            (lambda c: c.get_isp_metrics("5m"), "/v1/isp-metrics/5m", {}),
             (
-                lambda c: c.query_isp_metrics("s1", "2026-01-01T00:00:00Z"),
-                "/v1/isp/metrics",
-                {"site_id": "s1", "start_time": "2026-01-01T00:00:00Z"},
+                lambda c: c.get_isp_metrics("1h", duration="7d"),
+                "/v1/isp-metrics/1h",
+                {"duration": "7d"},
             ),
-            (lambda c: c.list_sdwan_configs(), "/v1/sdwan/configs", {}),
-            (lambda c: c.get_sdwan_config("c1"), "/v1/sdwan/configs/c1", {}),
-            (lambda c: c.get_sdwan_config_status("c1"), "/v1/sdwan/configs/c1/status", {}),
+            (
+                lambda c: c.get_isp_metrics(
+                    "5m",
+                    begin_timestamp="2026-01-01T00:00:00Z",
+                    end_timestamp="2026-01-02T00:00:00Z",
+                ),
+                "/v1/isp-metrics/5m",
+                {
+                    "beginTimestamp": "2026-01-01T00:00:00Z",
+                    "endTimestamp": "2026-01-02T00:00:00Z",
+                },
+            ),
+            (lambda c: c.list_sdwan_configs(), "/v1/sd-wan-configs", {}),
+            (lambda c: c.get_sdwan_config("c1"), "/v1/sd-wan-configs/c1", {}),
+            (lambda c: c.get_sdwan_config_status("c1"), "/v1/sd-wan-configs/c1/status", {}),
             (lambda c: c.list_hosts(), "/v1/hosts", {}),
-            (lambda c: c.list_hosts(limit=5), "/v1/hosts", {"limit": "5"}),
+            (lambda c: c.list_hosts(page_size=5), "/v1/hosts", {"pageSize": "5"}),
+            (
+                lambda c: c.list_hosts(next_token="abc"),
+                "/v1/hosts",
+                {"nextToken": "abc"},
+            ),
             (lambda c: c.get_host("h1"), "/v1/hosts/h1", {}),
+            (lambda c: c.list_devices(), "/v1/devices", {}),
+            (
+                lambda c: c.list_devices(time="2026-10-25T00:00:00Z", page_size=10),
+                "/v1/devices",
+                {"time": "2026-10-25T00:00:00Z", "pageSize": "10"},
+            ),
             (lambda c: c.get_version_control(), "/v1/version", {}),
         ],
     )
@@ -267,6 +289,33 @@ class TestEndpoints:
 
         assert seen[0].url.path == path
         assert dict(seen[0].url.params) == params
+
+
+class TestListDevices:
+    @pytest.mark.asyncio
+    async def test_host_ids_repeat_the_array_key(self, settings: MagicMock) -> None:
+        seen, handler = _recorder()
+        client = _client(settings, handler)
+
+        await client.list_devices(host_ids=["h1", "h2"], next_token="t")
+
+        assert seen[0].url.path == "/v1/devices"
+        assert seen[0].url.params.get_list("hostIds[]") == ["h1", "h2"]
+        assert seen[0].url.params["nextToken"] == "t"
+
+
+class TestQueryIspMetrics:
+    @pytest.mark.asyncio
+    async def test_query_posts_sites_body(self, settings: MagicMock) -> None:
+        seen, handler = _recorder()
+        client = _client(settings, handler)
+        sites = [{"hostId": "h1", "siteId": "s1", "beginTimestamp": "2026-01-01T00:00:00Z"}]
+
+        await client.query_isp_metrics("1h", sites)
+
+        assert seen[0].method == "POST"
+        assert seen[0].url.path == "/v1/isp-metrics/1h/query"
+        assert json.loads(seen[0].content) == {"sites": sites}
 
 
 class TestReplyShapes:

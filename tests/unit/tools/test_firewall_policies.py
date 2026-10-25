@@ -104,6 +104,48 @@ class TestListFirewallPolicies:
             assert result[0]["action"] == "BLOCK"
 
     @pytest.mark.asyncio
+    async def test_list_firewall_policies_zone_filter_accepts_name_and_uuid(
+        self, local_settings: Settings, sample_policy_response: list[dict]
+    ) -> None:
+        """Zone filters resolve a name or external UUID to the internal _id (gap L3)."""
+        from src.tools.firewall_policies import _zone_cache, list_firewall_policies
+
+        internal = "682a0e42220317278bb0b2c5"  # pragma: allowlist secret
+        external = "682a0e42220317278bb0b2c7"  # pragma: allowlist secret
+        policies = [dict(p) for p in sample_policy_response]
+        policies[1] = dict(policies[1], destination={"zone_id": external, "matching_target": "ANY"})
+        _zone_cache["default"] = {
+            internal: internal,
+            "1daa9f24-eeaf-4bec-a714-e5eb65ea7ba2": internal,
+            "internal": internal,
+            external: external,
+            "external": external,
+        }
+
+        with patch("src.tools.firewall_policies.UniFiClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client._site_uuid_to_name = {}
+            MockClient.return_value.__aenter__.return_value = mock_client
+            mock_client.is_authenticated = True
+            mock_client.get.return_value = policies
+
+            try:
+                by_name = await list_firewall_policies(
+                    "default", local_settings, destination_zone_id="External"
+                )
+                by_uuid = await list_firewall_policies(
+                    "default",
+                    local_settings,
+                    source_zone_id="1daa9f24-eeaf-4bec-a714-e5eb65ea7ba2",
+                    destination_zone_id=internal,
+                )
+            finally:
+                _zone_cache.pop("default", None)
+
+        assert [p["name"] for p in by_name] == ["Allow All Traffic"]
+        assert [p["name"] for p in by_uuid] == ["Block IOT to Internal"]
+
+    @pytest.mark.asyncio
     async def test_list_firewall_policies_empty_response(self, local_settings: Settings) -> None:
         """Test listing when no firewall policies exist."""
         from src.tools.firewall_policies import list_firewall_policies
@@ -1492,6 +1534,57 @@ class TestCreateFirewallPolicy:
         assert "Invalid action" in str(exc_info.value)
         assert "ALLOW" in str(exc_info.value)
         assert "BLOCK" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("action", "allow_respond", "expected"),
+        [
+            # Gateway destinations reject a respond rule, so the default is off.
+            ("ALLOW", None, False),
+            ("BLOCK", None, False),
+            ("ALLOW", True, True),
+            ("ALLOW", False, False),
+        ],
+    )
+    async def test_create_firewall_policy_allow_respond_default(
+        self, local_settings: Settings, action: str, allow_respond: bool | None, expected: bool
+    ) -> None:
+        from src.tools.firewall_policies import create_firewall_policy
+
+        with patch("src.tools.firewall_policies.UniFiClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client._site_uuid_to_name = {}
+            MockClient.return_value.__aenter__.return_value = mock_client
+
+            result = await create_firewall_policy(
+                name="p",
+                action=action,
+                site_id="default",
+                settings=local_settings,
+                create_allow_respond=allow_respond,
+                dry_run=True,
+            )
+
+        assert result["policy"]["create_allow_respond"] is expected
+
+    @pytest.mark.asyncio
+    async def test_create_firewall_policy_allow_respond_needs_allow(
+        self, local_settings: Settings
+    ) -> None:
+        """The API takes a respond rule (allowReturnTraffic) on ALLOW only."""
+        from src.tools.firewall_policies import create_firewall_policy
+
+        with patch("src.tools.firewall_policies.UniFiClient") as MockClient:
+            with pytest.raises(ValueError, match="create_allow_respond"):
+                await create_firewall_policy(
+                    name="p",
+                    action="BLOCK",
+                    site_id="default",
+                    settings=local_settings,
+                    create_allow_respond=True,
+                    confirm=True,
+                )
+        MockClient.return_value.__aenter__.return_value.post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_firewall_policy_allow_action(self, local_settings: Settings) -> None:

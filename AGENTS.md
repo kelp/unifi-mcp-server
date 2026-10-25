@@ -126,7 +126,7 @@ The rules this example follows:
 - **Optional update fields default to `None`.** Send only the fields the caller set. Some UniFi endpoints need the whole object (read, merge, write); the network and security skills list which ones.
 - **Do not audit in the tool.** The registry wrapper audits every mutating call. It also removes write tools under `UNIFI_READ_ONLY` and forces `dry_run` under `UNIFI_DRY_RUN`.
 - **Register the module.** Add it to `_LOCAL_TOOL_MODULES` or `_CLOUD_TOOL_MODULES` in `src/main.py`, and to the `UNIFI_PROFILE` sets that should include it.
-- **Update the tier snapshot.** Run `UPDATE_TOOL_TIERS=1 pytest tests/unit/fleet/test_tiers.py`. A destructive tool needs a `delete_`, `remove_` or `bulk_delete_` prefix, or an entry in `DESTRUCTIVE_TOOLS`. A write tool whose name has a risky word ("disable", "block", "reset" and others) must be in `DESTRUCTIVE_TOOLS` or in `RISKY_NAME_EXEMPTIONS` with a reason.
+- **Update the tier snapshot.** Run `UPDATE_TOOL_TIERS=1 pytest tests/unit/fleet/test_tiers.py`. A destructive tool needs a `delete_`, `remove_` or `bulk_delete_` prefix, or an entry in `DESTRUCTIVE_TOOLS`. A write tool whose name has a risky word ("disable", "block", "reset" and others) must be in `DESTRUCTIVE_TOOLS` or in `RISKY_NAME_EXEMPTIONS` with a reason. A read tool that returns camera images or stream URLs goes into `SENSITIVE_READ_TOOLS`, which gives it the `write` tier.
 
 ## Testing Requirements
 

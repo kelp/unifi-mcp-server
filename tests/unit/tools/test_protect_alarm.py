@@ -86,11 +86,27 @@ async def test_list_protect_arm_profiles_success(mock_settings, mock_client):
 
 @pytest.mark.asyncio
 async def test_get_protect_arm_profile_success(mock_settings, mock_client):
-    mock_client.get = AsyncMock(return_value={"id": "profile-1", "name": "Night"})
+    """The spec has no GET arm-profiles/{id}, so the tool filters the list (gap C5)."""
+    mock_client.get = AsyncMock(
+        return_value=[{"id": "profile-0", "name": "Day"}, {"id": "profile-1", "name": "Night"}]
+    )
     with patch("src.tools.protect_alarm.ProtectClient", return_value=mock_client):
         result = await get_protect_arm_profile("profile-1", mock_settings)
-    mock_client.get.assert_awaited_once_with("/integration/v1/arm-profiles/profile-1")
+    mock_client.get.assert_awaited_once_with(
+        "/integration/v1/arm-profiles", params={"limit": 1000, "offset": 0}
+    )
     assert result["id"] == "profile-1"
+    assert result["name"] == "Night"
+
+
+@pytest.mark.asyncio
+async def test_get_protect_arm_profile_not_found(mock_settings, mock_client):
+    from src.utils.exceptions import ResourceNotFoundError
+
+    mock_client.get = AsyncMock(return_value={"data": [{"id": "profile-0", "name": "Day"}]})
+    with patch("src.tools.protect_alarm.ProtectClient", return_value=mock_client):
+        with pytest.raises(ResourceNotFoundError):
+            await get_protect_arm_profile("profile-1", mock_settings)
 
 
 # --- Write gates ------------------------------------------------------------

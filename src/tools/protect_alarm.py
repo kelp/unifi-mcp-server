@@ -7,7 +7,13 @@ from typing import Any
 from ..api import ProtectClient
 from ..config import Settings
 from ..models import ProtectArmProfile, ProtectArmSchedule
-from ..utils import ValidationError, get_logger, sanitize_log_message, validate_limit_offset
+from ..utils import (
+    ResourceNotFoundError,
+    ValidationError,
+    get_logger,
+    sanitize_log_message,
+    validate_limit_offset,
+)
 from ..utils.tool_kind import read_tool, write_tool
 from ..utils.validators import coerce_bool, validate_confirmation
 
@@ -91,10 +97,11 @@ async def list_protect_arm_profiles(
 async def get_protect_arm_profile(arm_profile_id: str, settings: Settings) -> dict[str, Any]:
     """Get a single UniFi Protect arm profile.
 
-    Note: GET on arm-profiles/{id} is not published in the v7.3.68 spec (the
-    path exists there for PATCH/DELETE only). This is a convenience read and
-    may 404 on some controllers; prefer list_protect_arm_profiles where the
-    single fetch is not supported.
+    The spec has no GET on arm-profiles/{id} (that path takes only PATCH and
+    DELETE), so this reads the arm profile list and picks the matching ID.
+
+    Raises:
+        ResourceNotFoundError: If no arm profile has this ID
     """
     logger = get_logger(__name__, settings.log_level)
     arm_profile_id = _validate_arm_profile_id(arm_profile_id)
@@ -102,10 +109,17 @@ async def get_protect_arm_profile(arm_profile_id: str, settings: Settings) -> di
     async with ProtectClient(settings) as client:
         await client.authenticate()
         response = await client.get(
-            settings.get_protect_integration_path(f"arm-profiles/{arm_profile_id}")
+            settings.get_protect_integration_path("arm-profiles"),
+            params={"limit": 1000, "offset": 0},
         )
 
-    profile = ProtectArmProfile.model_validate(_extract_item(response))
+    match = next(
+        (item for item in _extract_collection(response) if item.get("id") == arm_profile_id),
+        None,
+    )
+    if match is None:
+        raise ResourceNotFoundError("Protect arm profile", arm_profile_id)
+    profile = ProtectArmProfile.model_validate(match)
     logger.info(sanitize_log_message(f"Retrieved Protect arm profile {arm_profile_id}"))
     return profile.model_dump(by_alias=True)
 

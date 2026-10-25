@@ -100,10 +100,23 @@ DESTRUCTIVE_TOOLS = frozenset(
         "assign_network_to_zone",
         "create_firewall_policy",
         "create_firewall_rule",
+        "reorder_firewall_policies",
         "unassign_network_from_zone",
         "update_firewall_policy",
         "update_firewall_rule",
         "update_zbf_policy",
+    }
+)
+
+#: Read tools that return camera media or a way to get it: images, stream
+#: URLs with access tokens, or a raw Protect GET that can fetch either. They
+#: make no controller write, so they stay registered in read-only mode, but the
+#: access check needs the ``write`` tier, which keeps them from the viewer role.
+SENSITIVE_READ_TOOLS = frozenset(
+    {
+        "connector_protect_get",
+        "get_protect_camera_rtsps_streams",
+        "get_protect_camera_snapshot",
     }
 )
 
@@ -120,13 +133,14 @@ def tool_tier(fn: Any) -> Tier:
         fn: The tool function to classify.
 
     Returns:
-        ``read`` for non-mutating tools, ``destructive`` for mutating tools in
+        ``read`` for non-mutating tools, ``write`` for the non-mutating tools
+        in :data:`SENSITIVE_READ_TOOLS`, ``destructive`` for mutating tools in
         :data:`DESTRUCTIVE_TOOLS` or with a destructive name prefix, and
         ``write`` for every other mutating tool.
     """
-    if not is_mutating_tool(fn):
-        return "read"
     name = getattr(fn, "__name__", "").lstrip("_")
+    if not is_mutating_tool(fn):
+        return "write" if name in SENSITIVE_READ_TOOLS else "read"
     if name in DESTRUCTIVE_TOOLS or name.startswith(_DESTRUCTIVE_PREFIXES):
         return "destructive"
     return "write"

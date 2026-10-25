@@ -662,6 +662,24 @@ class UniFiClient:
         """
         return await self._request("PUT", endpoint, params=params, json_data=json_data)
 
+    async def patch(
+        self,
+        endpoint: str,
+        json_data: dict[str, Any],
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Make a PATCH request.
+
+        Args:
+            endpoint: API endpoint path
+            json_data: JSON request body
+            params: Query parameters
+
+        Returns:
+            Response data
+        """
+        return await self._request("PATCH", endpoint, params=params, json_data=json_data)
+
     async def delete(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Make a DELETE request.
 

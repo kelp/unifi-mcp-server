@@ -1002,258 +1002,230 @@ async def test_search_across_sites_mac_address(mock_settings):
 
 
 # =============================================================================
-# Tests for ISP Metrics Tools (added 2026-02-16)
+# Tests for ISP Metrics Tools (spec: GET /v1/isp-metrics/{type},
+# POST /v1/isp-metrics/{type}/query)
 # =============================================================================
 
 
+def _client_cm(**methods):
+    mock_client = AsyncMock()
+    for name, value in methods.items():
+        setattr(mock_client, name, AsyncMock(return_value=value))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock()
+    return mock_client
+
+
+_ISP_ENTRY_S1 = {
+    "metricType": "5m",
+    "hostId": "host-1",
+    "siteId": "site-1",
+    "periods": [
+        {
+            "metricTime": "2026-02-16T12:00:00Z",
+            "version": "1",
+            "data": {"wan": {"avgLatency": 15, "download_kbps": 500000, "ispName": "ISP 1"}},
+        }
+    ],
+}
+_ISP_ENTRY_S2 = {**_ISP_ENTRY_S1, "siteId": "site-2"}
+
+
 @pytest.mark.asyncio
-async def test_get_isp_metrics_success(mock_settings):
-    """Test successful retrieval of ISP metrics for a site."""
+async def test_get_isp_metrics_spec_shape(mock_settings):
+    """The spec reply is data[] of {metricType, hostId, siteId, periods}."""
     from src.tools.site_manager import get_isp_metrics
 
-    mock_response = {
-        "data": {
-            "site_id": "site-1",
-            "isp_name": "Example ISP",
-            "download_bandwidth_mbps": 500.0,
-            "upload_bandwidth_mbps": 100.0,
-            "latency_ms": 15.5,
-            "jitter_ms": 2.3,
-            "packet_loss_percent": 0.1,
-            "timestamp": "2026-02-16T12:00:00Z",
-        }
-    }
+    mock_client = _client_cm(get_isp_metrics={"data": [_ISP_ENTRY_S1, _ISP_ENTRY_S2]})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        result = await get_isp_metrics(mock_settings, interval="1h", duration="7d")
 
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.get_isp_metrics = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
-        result = await get_isp_metrics(mock_settings, "site-1")
-
-        assert result["site_id"] == "site-1"
-        assert result["isp_name"] == "Example ISP"
-        assert result["download_bandwidth_mbps"] == 500.0
-        mock_client.get_isp_metrics.assert_called_once_with("site-1")
+    assert result["count"] == 2
+    assert result["interval"] == "1h"
+    assert result["data"][0]["periods"][0]["data"]["wan"]["avgLatency"] == 15
+    mock_client.get_isp_metrics.assert_called_once_with(
+        "1h", begin_timestamp=None, end_timestamp=None, duration="7d"
+    )
 
 
 @pytest.mark.asyncio
-async def test_query_isp_metrics_success(mock_settings):
-    """Test successful querying of ISP metrics."""
+async def test_get_isp_metrics_filters_site(mock_settings):
+    """site_id filters the account-wide reply on data[].siteId."""
+    from src.tools.site_manager import get_isp_metrics
+
+    mock_client = _client_cm(get_isp_metrics={"data": [_ISP_ENTRY_S1, _ISP_ENTRY_S2]})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        result = await get_isp_metrics(mock_settings, "site-2")
+
+    assert result["count"] == 1
+    assert result["data"][0]["siteId"] == "site-2"
+    mock_client.get_isp_metrics.assert_called_once_with(
+        "5m", begin_timestamp=None, end_timestamp=None, duration=None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"interval": "15m"},
+        {"interval": "5m", "duration": "7d"},
+        {"interval": "1h", "duration": "24h"},
+        {"duration": "24h", "begin_timestamp": "2026-01-01T00:00:00Z"},
+    ],
+)
+async def test_get_isp_metrics_rejects_bad_args(mock_settings, kwargs):
+    from src.tools.site_manager import get_isp_metrics
+    from src.utils.exceptions import ValidationError
+
+    mock_client = _client_cm(get_isp_metrics={"data": []})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        with pytest.raises(ValidationError):
+            await get_isp_metrics(mock_settings, **kwargs)
+    mock_client.get_isp_metrics.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_query_isp_metrics_posts_host_and_site(mock_settings):
+    """The query body is {"sites": [{hostId, siteId, beginTimestamp, endTimestamp}]}."""
     from src.tools.site_manager import query_isp_metrics
 
     mock_response = {
-        "data": [
-            {
-                "site_id": "site-1",
-                "isp_name": "ISP 1",
-                "download_bandwidth_mbps": 500.0,
-                "upload_bandwidth_mbps": 100.0,
-                "latency_ms": 15.5,
-                "jitter_ms": 2.3,
-                "packet_loss_percent": 0.1,
-                "timestamp": "2026-02-16T12:00:00Z",
-            }
-        ]
+        "data": {"metrics": [_ISP_ENTRY_S1], "status": "partialSuccess", "message": "m"}
     }
-
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.query_isp_metrics = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
+    mock_client = _client_cm(query_isp_metrics=mock_response)
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
         result = await query_isp_metrics(
-            mock_settings, site_id="site-1", start_time="2026-02-16T00:00:00Z"
+            mock_settings,
+            site_id="site-1",
+            host_id="host-1",
+            interval="1h",
+            start_time="2026-02-16T00:00:00Z",
         )
 
-        assert len(result) == 1
-        assert result[0]["site_id"] == "site-1"
-        mock_client.query_isp_metrics.assert_called_once()
+    assert result["count"] == 1
+    assert result["status"] == "partialSuccess"
+    assert result["data"][0]["siteId"] == "site-1"
+    mock_client.query_isp_metrics.assert_called_once_with(
+        "1h",
+        [{"hostId": "host-1", "siteId": "site-1", "beginTimestamp": "2026-02-16T00:00:00Z"}],
+    )
 
 
 @pytest.mark.asyncio
-async def test_query_isp_metrics_single_dict_return(mock_settings):
-    """Test query_isp_metrics with single dict return from API."""
+async def test_query_isp_metrics_rejects_bad_interval(mock_settings):
     from src.tools.site_manager import query_isp_metrics
+    from src.utils.exceptions import ValidationError
 
-    # API returns single dict instead of list
-    mock_response = {
-        "data": {
-            "site_id": "site-1",
-            "isp_name": "Example ISP",
-            "download_bandwidth_mbps": 500.0,
-            "upload_bandwidth_mbps": 100.0,
-            "latency_ms": 15.5,
-            "jitter_ms": 2.1,
-            "packet_loss_percent": 0.05,
-            "timestamp": "2026-02-16T12:00:00Z",
-        }
-    }
-
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.query_isp_metrics = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
-        result = await query_isp_metrics(mock_settings, site_id="site-1")
-
-        # Should wrap single dict in a list
-        assert len(result) == 1
-        assert result[0]["site_id"] == "site-1"
-        assert result[0]["isp_name"] == "Example ISP"
-        mock_client.query_isp_metrics.assert_called_once()
+    mock_client = _client_cm(query_isp_metrics={})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        with pytest.raises(ValidationError):
+            await query_isp_metrics(mock_settings, site_id="s", host_id="h", interval="1d")
 
 
 # =============================================================================
-# Tests for SD-WAN Configuration Tools (added 2026-02-16)
+# Tests for SD-WAN Configuration Tools (spec: /v1/sd-wan-configs)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_list_sdwan_configs_success(mock_settings):
-    """Test successful retrieval of SD-WAN configurations."""
+async def test_list_sdwan_configs_spec_shape(mock_settings):
+    """The spec list item is {id, name, type}."""
     from src.tools.site_manager import list_sdwan_configs
 
-    mock_response = {
-        "data": [
-            {
-                "config_id": "config-1",
-                "name": "Hub-Spoke Config",
-                "topology_type": "hub-spoke",
-                "hub_site_ids": ["site-1"],
-                "spoke_site_ids": ["site-2", "site-3"],
-                "failover_enabled": True,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-02-01T00:00:00Z",
-                "status": "active",
-            }
-        ]
-    }
-
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.list_sdwan_configs = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
+    mock_response = {"data": [{"id": "config-1", "name": "HBSP", "type": "sdwan-hbsp"}]}
+    mock_client = _client_cm(list_sdwan_configs=mock_response)
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
         result = await list_sdwan_configs(mock_settings)
 
-        assert len(result) == 1
-        assert result[0]["config_id"] == "config-1"
-        assert result[0]["topology_type"] == "hub-spoke"
-        mock_client.list_sdwan_configs.assert_called_once()
+    assert result == [{"id": "config-1", "name": "HBSP", "type": "sdwan-hbsp"}]
 
 
 @pytest.mark.asyncio
-async def test_get_sdwan_config_success(mock_settings):
-    """Test successful retrieval of SD-WAN config by ID."""
+async def test_get_sdwan_config_spec_shape(mock_settings):
+    """The spec detail carries variant, settings, hubs and spokes."""
     from src.tools.site_manager import get_sdwan_config
 
-    mock_response = {
-        "data": {
-            "config_id": "config-1",
-            "name": "Hub-Spoke Config",
-            "topology_type": "hub-spoke",
-            "hub_site_ids": ["site-1"],
-            "spoke_site_ids": ["site-2"],
-            "failover_enabled": True,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-02-01T00:00:00Z",
-            "status": "active",
-        }
+    config = {
+        "id": "config-1",
+        "name": "HBSP",
+        "type": "sdwan-hbsp",
+        "variant": "failover",
+        "settings": {"hubsInterconnect": True},
+        "hubs": [{"id": "hub-1", "hostId": "h1", "siteId": "s1"}],
+        "spokes": [{"id": "spoke-1", "hostId": "h2", "siteId": "s2"}],
     }
-
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.get_sdwan_config = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
+    mock_client = _client_cm(get_sdwan_config={"data": config})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
         result = await get_sdwan_config(mock_settings, "config-1")
 
-        assert result["config_id"] == "config-1"
-        assert result["name"] == "Hub-Spoke Config"
-        mock_client.get_sdwan_config.assert_called_once_with("config-1")
+    assert result == config
+    mock_client.get_sdwan_config.assert_called_once_with("config-1")
 
 
 @pytest.mark.asyncio
-async def test_get_sdwan_config_status_success(mock_settings):
-    """Test successful retrieval of SD-WAN config status."""
+async def test_get_sdwan_config_status_spec_shape(mock_settings):
+    """The spec status is {id, fingerprint, updatedAt, hubs[]}."""
     from src.tools.site_manager import get_sdwan_config_status
 
-    mock_response = {
-        "data": {
-            "config_id": "config-1",
-            "deployment_status": "deployed",
-            "sites_deployed": 3,
-            "sites_total": 3,
-            "last_deployment_at": "2026-02-15T10:00:00Z",
-            "error_message": None,
-        }
-    }
-
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.get_sdwan_config_status = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
-
+    status = {"id": "config-1", "fingerprint": "f1", "updatedAt": 1700000000, "hubs": []}
+    mock_client = _client_cm(get_sdwan_config_status={"data": status})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
         result = await get_sdwan_config_status(mock_settings, "config-1")
 
-        assert result["config_id"] == "config-1"
-        assert result["deployment_status"] == "deployed"
-        assert result["sites_deployed"] == 3
-        mock_client.get_sdwan_config_status.assert_called_once_with("config-1")
+    assert result == status
+    mock_client.get_sdwan_config_status.assert_called_once_with("config-1")
 
 
 # =============================================================================
-# Tests for Host Management Tools (added 2026-02-16)
+# Tests for Host Management Tools (spec pagination: pageSize, nextToken)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_list_hosts_success(mock_settings):
-    """Test successful retrieval of hosts list."""
+async def test_list_hosts_returns_next_token(mock_settings):
     from src.tools.site_manager import list_hosts
 
-    mock_response = {
-        "data": [
-            {
-                "host_id": "host-1",
-                "hostname": "controller-01",
-                "ip_address": "192.168.1.1",
-                "mac_address": "00:11:22:33:44:55",
-                "model": "UDM-Pro",
-                "version": "10.0.156",
-                "site_count": 2,
-                "status": "online",
-                "last_seen": "2026-02-16T12:00:00Z",
-            }
-        ]
-    }
+    mock_response = {"data": [{"id": "host-1", "type": "console"}], "nextToken": "t2"}
+    mock_client = _client_cm(list_hosts=mock_response)
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        result = await list_hosts(mock_settings, page_size=1, next_token="t1")
 
-    with patch("src.tools.site_manager.SiteManagerClient") as mock_client_class:
-        mock_client = AsyncMock()
-        mock_client.list_hosts = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock()
-        mock_client_class.return_value = mock_client
+    assert result == {"count": 1, "data": [{"id": "host-1", "type": "console"}], "next_token": "t2"}
+    mock_client.list_hosts.assert_called_once_with(page_size=1, next_token="t1")
 
+
+@pytest.mark.asyncio
+async def test_list_hosts_bare_array_reply(mock_settings):
+    from src.tools.site_manager import list_hosts
+
+    mock_client = _client_cm(list_hosts=[{"id": "host-1"}])
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
         result = await list_hosts(mock_settings)
 
-        assert len(result) == 1
-        assert result[0]["host_id"] == "host-1"
-        assert result[0]["hostname"] == "controller-01"
-        mock_client.list_hosts.assert_called_once_with(None, None)
+    assert result == {"count": 1, "data": [{"id": "host-1"}], "next_token": None}
+
+
+@pytest.mark.asyncio
+async def test_list_site_manager_devices(mock_settings):
+    from src.tools.site_manager import list_site_manager_devices
+
+    host = {
+        "hostId": "host-1",
+        "hostName": "UDM",
+        "devices": [{"id": "d1", "mac": "aa:bb:cc:dd:ee:ff", "status": "online"}],
+        "updatedAt": "2026-10-25T10:00:00Z",
+    }
+    mock_client = _client_cm(list_devices={"data": [host], "nextToken": "t2"})
+    with patch("src.tools.site_manager.SiteManagerClient", return_value=mock_client):
+        result = await list_site_manager_devices(
+            mock_settings, host_ids=["host-1"], page_size=50, next_token="t1"
+        )
+
+    mock_client.list_devices.assert_called_once_with(
+        host_ids=["host-1"], time=None, page_size=50, next_token="t1"
+    )
+    assert result == {"count": 1, "device_count": 1, "data": [host], "next_token": "t2"}
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,9 @@ from ..api.client import UniFiClient
 from ..config import Settings
 from ..models import ACLRule
 from ..utils import (
+    ValidationError,
     audit_action,
+    coerce_bool,
     get_logger,
     sanitize_log_message,
     validate_confirmation,
@@ -420,3 +422,84 @@ async def delete_acl_rule(
         )
 
         return {"success": True, "message": f"ACL rule {acl_rule_id} deleted successfully"}
+
+
+def _acl_ordering_result(site_id: str, response: Any) -> dict[str, Any]:
+    if isinstance(response, dict) and isinstance(response.get("data"), dict):
+        response = response["data"]
+    ids = response.get("orderedAclRuleIds", []) if isinstance(response, dict) else []
+    return {"site_id": site_id, "ordered_acl_rule_ids": list(ids or [])}
+
+
+@read_tool
+async def get_acl_rule_ordering(site_id: str, settings: Settings) -> dict[str, Any]:
+    """Get the order of user-defined ACL rules on a site.
+
+    Rules are evaluated in this order.
+
+    Args:
+        site_id: Site identifier
+        settings: Application settings
+
+    Returns:
+        {"site_id", "ordered_acl_rule_ids"} with integration rule UUIDs
+    """
+    site_id = validate_site_id(site_id)
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        resolved_site_id = await client.resolve_site_id(site_id)
+        response = await client.get(
+            settings.get_integration_path(f"sites/{resolved_site_id}/acl-rules/ordering")
+        )
+
+    return _acl_ordering_result(site_id, response)
+
+
+@write_tool
+async def reorder_acl_rules(
+    site_id: str,
+    ordered_acl_rule_ids: list[str],
+    settings: Settings,
+    confirm: bool | str = False,
+    dry_run: bool | str = False,
+) -> dict[str, Any]:
+    """Set the order of user-defined ACL rules on a site.
+
+    Read the current order with get_acl_rule_ordering first and pass every
+    user-defined rule ID. The order decides which rule wins when several match.
+
+    Args:
+        site_id: Site identifier
+        ordered_acl_rule_ids: Every user-defined ACL rule UUID, in the new order
+        settings: Application settings
+        confirm: Must be true to apply (required unless dry_run)
+        dry_run: Preview the request without sending it
+
+    Returns:
+        The new order, in the get_acl_rule_ordering shape
+    """
+    validate_confirmation(confirm, "reorder ACL rules", dry_run)
+    site_id = validate_site_id(site_id)
+    ids = [str(i).strip() for i in (ordered_acl_rule_ids or [])]
+    if not ids or not all(ids):
+        raise ValidationError("ordered_acl_rule_ids must be a non-empty list of rule IDs")
+    if len(set(ids)) != len(ids):
+        raise ValidationError("A rule ID appears more than once in the new order")
+
+    payload = {"orderedAclRuleIds": ids}
+    if coerce_bool(dry_run):
+        return {"dry_run": True, "operation": "reorder_acl_rules", "payload": payload}
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        resolved_site_id = await client.resolve_site_id(site_id)
+        response = await client.put(
+            settings.get_integration_path(f"sites/{resolved_site_id}/acl-rules/ordering"),
+            json_data=payload,
+        )
+
+    logger.info(sanitize_log_message(f"Reordered {len(ids)} ACL rules on site {site_id}"))
+    return _acl_ordering_result(site_id, response)

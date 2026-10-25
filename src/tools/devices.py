@@ -10,6 +10,7 @@ from ..utils import (
     ResourceNotFoundError,
     ValidationError,
     audit_action,
+    coerce_bool,
     get_logger,
     sanitize_log_message,
     validate_confirmation,
@@ -169,13 +170,25 @@ async def get_device_details(site_id: str, device_id: str, settings: Settings) -
 async def get_device_statistics(site_id: str, device_id: str, settings: Settings) -> dict[str, Any]:
     """Retrieve real-time statistics for a device.
 
+    A UUID (integration API, from ``get_network_topology`` or
+    ``list_integration_devices``) reads
+    ``/devices/{id}/statistics/latest`` and returns the spec fields:
+    ``uptimeSec``, ``lastHeartbeatAt``, ``nextHeartbeatAt``,
+    ``cpuUtilizationPct``, ``memoryUtilizationPct``,
+    ``loadAverage1Min``/``5Min``/``15Min``, ``uplink.txRateBps``/``rxRateBps``
+    and ``interfaces.radios[].frequencyGHz``/``txRetriesPct``.
+
+    A legacy ObjectId reads the legacy device list and returns ``uptime``,
+    ``cpu``, ``mem``, ``tx_bytes``, ``rx_bytes``, ``bytes``, ``state`` and
+    ``uplink_depth``.
+
     Args:
         site_id: Site identifier
-        device_id: Device identifier
+        device_id: Device UUID or legacy ObjectId
         settings: Application settings
 
     Returns:
-        Device statistics dictionary
+        Device statistics dictionary with ``device_id``
     """
     site_id = validate_site_id(site_id)
     device_id = validate_device_id(device_id)
@@ -183,6 +196,18 @@ async def get_device_statistics(site_id: str, device_id: str, settings: Settings
 
     async with UniFiClient(settings) as client:
         await client.authenticate()
+
+        if len(device_id) == 36:
+            site_uuid = await client.resolve_site_id(site_id)
+            latest = await client.get(
+                settings.get_integration_path(
+                    f"sites/{site_uuid}/devices/{device_id}/statistics/latest"
+                )
+            )
+            if isinstance(latest, dict) and isinstance(latest.get("data"), dict):
+                latest = latest["data"]
+            logger.info(sanitize_log_message(f"Retrieved statistics for device {device_id}"))
+            return {"device_id": device_id, **(latest if isinstance(latest, dict) else {})}
 
         response = await client.get(f"/ea/sites/{site_id}/devices")
         devices_data = response.get("data", []) if isinstance(response, dict) else response
@@ -583,3 +608,48 @@ async def execute_port_action(
 
         logger.info(sanitize_log_message(f"Successfully power-cycled port {port_idx}"))
         return {"success": True, "action": "POWER_CYCLE", "port_idx": port_idx, "result": data}
+
+
+@write_tool
+async def remove_device(
+    site_id: str,
+    device_id: str,
+    settings: Settings,
+    confirm: bool | str = False,
+    dry_run: bool | str = False,
+) -> dict[str, Any]:
+    """Remove (unadopt) a device from the site (DELETE /devices/{id}).
+
+    An online device is reset to factory defaults and must be adopted again.
+    Clients behind it lose their connection.
+
+    Args:
+        site_id: Site identifier
+        device_id: Device integration UUID (from list_integration_devices or
+            get_network_topology)
+        settings: Application settings
+        confirm: Must be true to remove the device (required unless dry_run)
+        dry_run: Preview without sending the request
+
+    Returns:
+        {"success": True, "device_id": ...}
+    """
+    validate_confirmation(confirm, "remove (unadopt) device", dry_run)
+    site_id = validate_site_id(site_id)
+    device_id = validate_device_id(device_id)
+    if len(device_id) != 36:
+        raise ValidationError(
+            "remove_device needs the device's integration UUID, not a legacy ObjectId"
+        )
+    if coerce_bool(dry_run):
+        return {"dry_run": True, "operation": "remove_device", "device_id": device_id}
+
+    async with UniFiClient(settings) as client:
+        await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        await client.delete(settings.get_integration_path(f"sites/{site_uuid}/devices/{device_id}"))
+
+    get_logger(__name__, settings.log_level).info(
+        sanitize_log_message(f"Removed device {device_id} from site {site_id}")
+    )
+    return {"success": True, "device_id": device_id}

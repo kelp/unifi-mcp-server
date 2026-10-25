@@ -208,6 +208,38 @@ class TestGetDeviceDetails:
 
 class TestGetDeviceStatistics:
     @pytest.mark.asyncio
+    async def test_get_device_statistics_uuid_uses_integration_latest(self, monkeypatch):
+        """A UUID reads /devices/{id}/statistics/latest in the spec shape."""
+        from src.config import Settings
+
+        monkeypatch.setenv("UNIFI_API_KEY", "test-api-key")
+        monkeypatch.setenv("UNIFI_API_TYPE", "local")
+        monkeypatch.setenv("UNIFI_LOCAL_HOST", "192.0.2.1")
+        settings = Settings()
+        device_uuid = "77777777-7777-7777-7777-777777777777"
+        stats = {
+            "uptimeSec": 86400,
+            "lastHeartbeatAt": "2026-10-25T10:00:00Z",
+            "cpuUtilizationPct": 12.5,
+            "memoryUtilizationPct": 40.0,
+            "loadAverage1Min": 0.4,
+            "uplink": {"txRateBps": 1000, "rxRateBps": 2000},
+            "interfaces": {"radios": [{"frequencyGHz": 5, "txRetriesPct": 3.1}]},
+        }
+        client = create_mock_client(stats)
+        client.resolve_site_id = AsyncMock(return_value="site-uuid")
+
+        with patch("src.tools.devices.UniFiClient") as mock_client_class:
+            mock_client_class.return_value = client
+            result = await get_device_statistics("default", device_uuid, settings)
+
+        client.get.assert_awaited_once_with(
+            "/proxy/network/integration/v1/sites/site-uuid/devices/"
+            f"{device_uuid}/statistics/latest"
+        )
+        assert result == {"device_id": device_uuid, **stats}
+
+    @pytest.mark.asyncio
     async def test_get_device_statistics_success(self, mock_settings):
         device = make_device(DEVICE_ID_1)
         mock_response = {"data": [device]}

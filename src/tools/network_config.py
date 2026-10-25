@@ -16,6 +16,35 @@ from ..utils import (
 )
 from ..utils.tool_kind import write_tool
 
+_IPV6_INTERFACE_TYPES = ("none", "pd", "static")
+
+
+def _ipv6_fields(
+    ipv6_interface_type: str | None,
+    ipv6_pd_interface: str | None,
+    ipv6_pd_prefixid: str | None,
+    ipv6_ra_enabled: bool | None,
+    dhcpv6_enabled: bool | None,
+    dhcpv6_start: str | None,
+    dhcpv6_stop: str | None,
+) -> dict[str, Any]:
+    """Map IPv6 arguments to legacy networkconf fields. Skip None values."""
+    if ipv6_interface_type is not None and ipv6_interface_type not in _IPV6_INTERFACE_TYPES:
+        raise ValidationError(
+            f"Invalid ipv6_interface_type '{ipv6_interface_type}'. "
+            f"Must be one of: {list(_IPV6_INTERFACE_TYPES)}"
+        )
+    fields = {
+        "ipv6_interface_type": ipv6_interface_type,
+        "ipv6_pd_interface": ipv6_pd_interface,
+        "ipv6_pd_prefixid": ipv6_pd_prefixid,
+        "ipv6_ra_enabled": None if ipv6_ra_enabled is None else coerce_bool(ipv6_ra_enabled),
+        "dhcpdv6_enabled": None if dhcpv6_enabled is None else coerce_bool(dhcpv6_enabled),
+        "dhcpdv6_start": dhcpv6_start,
+        "dhcpdv6_stop": dhcpv6_stop,
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
 
 @write_tool
 async def create_network(
@@ -33,6 +62,13 @@ async def create_network(
     dhcp_dns_3: str | None = None,
     dhcp_dns_4: str | None = None,
     domain_name: str | None = None,
+    ipv6_interface_type: str | None = None,
+    ipv6_pd_interface: str | None = None,
+    ipv6_pd_prefixid: str | None = None,
+    ipv6_ra_enabled: bool | None = None,
+    dhcpv6_enabled: bool | None = None,
+    dhcpv6_start: str | None = None,
+    dhcpv6_stop: str | None = None,
     confirm: bool | str = False,
     dry_run: bool | str = False,
 ) -> dict[str, Any]:
@@ -53,6 +89,13 @@ async def create_network(
         dhcp_dns_3: Tertiary DNS server
         dhcp_dns_4: Quaternary DNS server
         domain_name: Domain name for DHCP
+        ipv6_interface_type: IPv6 mode: none, pd (prefix delegation) or static
+        ipv6_pd_interface: WAN that delegates the prefix (pd mode), e.g. "wan"
+        ipv6_pd_prefixid: Delegated prefix ID (pd mode)
+        ipv6_ra_enabled: Send IPv6 router advertisements
+        dhcpv6_enabled: Enable the DHCPv6 server
+        dhcpv6_start: DHCPv6 range start (suffix, e.g. "::2")
+        dhcpv6_stop: DHCPv6 range end (suffix)
         confirm: Confirmation flag (must be True to execute)
         dry_run: If True, validate but don't create the network
 
@@ -106,6 +149,18 @@ async def create_network(
             network_data["dhcpd_dns_4"] = dhcp_dns_4
         if domain_name:
             network_data["domain_name"] = domain_name
+
+    network_data.update(
+        _ipv6_fields(
+            ipv6_interface_type,
+            ipv6_pd_interface,
+            ipv6_pd_prefixid,
+            ipv6_ra_enabled,
+            dhcpv6_enabled,
+            dhcpv6_start,
+            dhcpv6_stop,
+        )
+    )
 
     # Log parameters for audit
     parameters = {
@@ -182,6 +237,13 @@ async def update_network(
     dhcp_dns_3: str | None = None,
     dhcp_dns_4: str | None = None,
     domain_name: str | None = None,
+    ipv6_interface_type: str | None = None,
+    ipv6_pd_interface: str | None = None,
+    ipv6_pd_prefixid: str | None = None,
+    ipv6_ra_enabled: bool | None = None,
+    dhcpv6_enabled: bool | None = None,
+    dhcpv6_start: str | None = None,
+    dhcpv6_stop: str | None = None,
     confirm: bool | str = False,
     dry_run: bool | str = False,
 ) -> dict[str, Any]:
@@ -205,6 +267,13 @@ async def update_network(
         dhcp_dns_3: New tertiary DNS server
         dhcp_dns_4: New quaternary DNS server
         domain_name: New domain name
+        ipv6_interface_type: IPv6 mode: none, pd (prefix delegation) or static
+        ipv6_pd_interface: WAN that delegates the prefix (pd mode), e.g. "wan"
+        ipv6_pd_prefixid: Delegated prefix ID (pd mode)
+        ipv6_ra_enabled: Send IPv6 router advertisements
+        dhcpv6_enabled: Enable the DHCPv6 server
+        dhcpv6_start: DHCPv6 range start (suffix, e.g. "::2")
+        dhcpv6_stop: DHCPv6 range end (suffix)
         confirm: Confirmation flag (must be True to execute)
         dry_run: If True, validate but don't update the network
 
@@ -228,6 +297,16 @@ async def update_network(
     if subnet is not None and "/" not in subnet:
         raise ValidationError(f"Invalid subnet '{subnet}'. Must be in CIDR notation")
 
+    ipv6_updates = _ipv6_fields(
+        ipv6_interface_type,
+        ipv6_pd_interface,
+        ipv6_pd_prefixid,
+        ipv6_ra_enabled,
+        dhcpv6_enabled,
+        dhcpv6_start,
+        dhcpv6_stop,
+    )
+
     parameters = {
         "site_id": site_id,
         "network_id": network_id,
@@ -242,6 +321,7 @@ async def update_network(
         "dhcp_dns_3": dhcp_dns_3,
         "dhcp_dns_4": dhcp_dns_4,
         "domain_name": domain_name,
+        **ipv6_updates,
     }
 
     if dry_run:
@@ -304,6 +384,7 @@ async def update_network(
                 update_data["dhcpd_dns_4"] = dhcp_dns_4
             if domain_name is not None:
                 update_data["domain_name"] = domain_name
+            update_data.update(ipv6_updates)
 
             response = await client.put(
                 f"/ea/sites/{site_id}/rest/networkconf/{network_id}", json_data=update_data

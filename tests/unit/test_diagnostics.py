@@ -43,53 +43,66 @@ def create_mock_client(get_responses=None):
     return mock_client
 
 
+NET_UUID = "55555555-5555-5555-5555-555555555555"
+
+
+@pytest.fixture
+def local_settings(monkeypatch):
+    from src.config import Settings
+
+    monkeypatch.setenv("UNIFI_API_KEY", "test-api-key")
+    monkeypatch.setenv("UNIFI_API_TYPE", "local")
+    monkeypatch.setenv("UNIFI_LOCAL_HOST", "192.0.2.1")
+    return Settings()
+
+
+def _refs_client(response):
+    client = create_mock_client([response])
+    client.is_authenticated = True
+    client.resolve_site_id = AsyncMock(return_value="site-uuid")
+    return client
+
+
 class TestGetNetworkReferences:
     @pytest.mark.asyncio
-    async def test_get_network_references_success(self, mock_settings):
-        """Test successful retrieval of network references."""
+    async def test_get_network_references_success(self, local_settings):
+        """References come from the integration route in the spec shape."""
         response = {
-            "data": {
-                "referenceResources": [
-                    {
-                        "id": "ref-1",
-                        "name": "Main WiFi",
-                        "type": "wifi",
-                        "resource_type": "broadcast",
-                    },
-                    {
-                        "id": "ref-2",
-                        "name": "Port Profile 1",
-                        "type": "port_profile",
-                        "resource_type": "switching",
-                    },
-                ]
-            }
+            "referenceResources": [
+                {
+                    "resourceType": "WIFI",
+                    "referenceCount": 1,
+                    "references": [{"referenceId": "66666666-6666-6666-6666-666666666666"}],
+                },
+                {"resourceType": "CLIENT", "referenceCount": 12},
+            ]
         }
+        client = _refs_client(response)
 
         with patch("src.tools.diagnostics.UniFiClient") as mock_client_class:
-            mock_client_class.return_value = create_mock_client([response])
+            mock_client_class.return_value = client
 
-            result = await get_network_references("site-1", "net-123", mock_settings)
+            result = await get_network_references("default", NET_UUID, local_settings)
 
-            assert isinstance(result, dict)
-            assert "references" in result
-            assert len(result["references"]) == 2
-            assert result["references"][0]["name"] == "Main WiFi"
-            assert result["references"][1]["type"] == "port_profile"
-            assert result["network_id"] == "net-123"
+        client.get.assert_awaited_once_with(
+            f"/proxy/network/integration/v1/sites/site-uuid/networks/{NET_UUID}/references"
+        )
+        assert result["network_id"] == NET_UUID
+        assert result["references"] == response["referenceResources"]
+        assert result["total_references"] == 13
 
     @pytest.mark.asyncio
-    async def test_get_network_references_empty(self, mock_settings):
+    async def test_get_network_references_empty(self, local_settings):
         """Test network references with empty response."""
-        response = {"data": {"referenceResources": []}}
+        client = _refs_client({"data": {"referenceResources": []}})
 
         with patch("src.tools.diagnostics.UniFiClient") as mock_client_class:
-            mock_client_class.return_value = create_mock_client([response])
+            mock_client_class.return_value = client
 
-            result = await get_network_references("site-1", "net-123", mock_settings)
+            result = await get_network_references("default", NET_UUID, local_settings)
 
-            assert result["references"] == []
-            assert result["network_id"] == "net-123"
+        assert result["references"] == []
+        assert result["total_references"] == 0
 
     @pytest.mark.asyncio
     async def test_get_network_references_invalid_site_id(self, mock_settings):

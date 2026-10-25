@@ -551,7 +551,7 @@ Re-encrypt every stored API key under the newest `UNIFI_FLEET_CREDENTIAL_KEY` ke
 
 #### Access control
 
-Every tool has a risk tier: `read`, `write`, `destructive` or `fleet-admin`. A caller's role grants tiers: `viewer` (read), `operator` (+ write), `admin` (+ destructive), `fleet-admin` (+ registry, token and audit tools). Destructive tools include deletes, restores, restarts, client blocking and firewall policy changes (`create_firewall_policy`, `update_firewall_policy`, `update_zbf_policy`, `create_firewall_rule`, `update_firewall_rule`, `assign_network_to_zone`, `unassign_network_from_zone`), so an `operator` cannot change which traffic the firewall allows. A token can be narrowed further by `allow_modules`/`deny_modules` (patterns over tool module names, e.g. `protect_*`) and `controller_labels` (a controller must carry all of them). A refused call fails with `Permission denied: <tool> needs the '<tier>' tier` and is recorded as a `denied` audit event. `MCP_AUTH_TOKEN` tokens and stdio are break-glass `fleet-admin` callers (stdio's role is set by `UNIFI_STDIO_ROLE`). An `MCP_AUTH_TOKEN` entry written `<role>:<token>`, for example `viewer:<token>`, gets that role instead, with or without the fleet registry, so a single host can issue a read-only token. Static tokens take no module or controller filters; use issued tokens for those.
+Every tool has a risk tier: `read`, `write`, `destructive` or `fleet-admin`. A caller's role grants tiers: `viewer` (read), `operator` (+ write), `admin` (+ destructive), `fleet-admin` (+ registry, token and audit tools). Destructive tools include deletes, restores, restarts, client blocking and firewall policy changes (`create_firewall_policy`, `update_firewall_policy`, `update_zbf_policy`, `create_firewall_rule`, `update_firewall_rule`, `assign_network_to_zone`, `unassign_network_from_zone`), so an `operator` cannot change which traffic the firewall allows. Camera media reads (`get_protect_camera_snapshot`, `get_protect_camera_rtsps_streams` and `connector_protect_get`, listed in `SENSITIVE_READ_TOOLS`) make no write, so they stay registered with `UNIFI_READ_ONLY`, but they need the `write` tier, so a `viewer` cannot see camera images or stream URLs. A token can be narrowed further by `allow_modules`/`deny_modules` (patterns over tool module names, e.g. `protect_*`) and `controller_labels` (a controller must carry all of them). A refused call fails with `Permission denied: <tool> needs the '<tier>' tier` and is recorded as a `denied` audit event. `MCP_AUTH_TOKEN` tokens and stdio are break-glass `fleet-admin` callers (stdio's role is set by `UNIFI_STDIO_ROLE`). An `MCP_AUTH_TOKEN` entry written `<role>:<token>`, for example `viewer:<token>`, gets that role instead, with or without the fleet registry, so a single host can issue a read-only token. Static tokens take no module or controller filters; use issued tokens for those.
 
 #### `create_api_token`
 
@@ -662,15 +662,67 @@ The currently implemented Protect MCP tools are grouped below. `update_protect_d
 - `list_protect_cameras(limit=None, offset=None)`
 - `get_protect_camera(camera_id)`
 
+`GET cameras` takes no paging parameters, so `limit` and `offset` page the
+returned array in the server. Each camera carries the Protect 7.3.70 fields
+(`modelKey`, `state`, `type`, `guid`, `mac`, `isMicEnabled`, `micVolume`,
+`osdSettings`, `ledSettings`, `lcdMessage`, `activePatrolSlot`, `videoMode`,
+`hdrType`, `hasPackageCamera`, `smartDetectSettings`, `featureFlags`).
+`model` comes from `type`, and `hasMic` and `hasSpeaker` come from
+`featureFlags`. `isRecording`, `canPtz` and `firmwareVersion` are not in the
+7.3.70 API and are null unless older firmware sends them.
+
 ```python
 result = await mcp.call_tool("list_protect_cameras", {"limit": 10, "offset": 0})
 camera = await mcp.call_tool("get_protect_camera", {"camera_id": "cam-1"})
+```
+
+- `update_protect_camera(camera_id, name=None, osd_settings=None, led_settings=None, lcd_message=None, mic_volume=None, video_mode=None, hdr_type=None, smart_detect_settings=None, confirm=False, dry_run=False)`:
+  `PATCH cameras/{id}`. Send only the fields to change. `mic_volume` is
+  0-100. `video_mode` is `default`, `highFps`, `sport`, `slowShutter`,
+  `lprReflex` or `lprNoneReflex`. `hdr_type` is `auto`, `on` or `off`.
+  `lcd_message` is `{"type", "text", "resetAt"}` with type
+  `LEAVE_PACKAGE_AT_DOOR`, `DO_NOT_DISTURB`, `CUSTOM_MESSAGE` or `IMAGE`.
+- `create_protect_camera_rtsps_stream(camera_id, qualities, confirm=False, dry_run=False)`:
+  `POST cameras/{id}/rtsps-stream` with `{"qualities": [...]}`. Returns
+  `{"success", "camera_id", "streams": {quality: url}}`.
+- `get_protect_camera_rtsps_streams(camera_id)`: `GET cameras/{id}/rtsps-stream`.
+  Returns `{"camera_id", "streams"}`; a quality with no stream is null.
+- `delete_protect_camera_rtsps_stream(camera_id, qualities, confirm=False, dry_run=False)`:
+  `DELETE cameras/{id}/rtsps-stream?qualities=...`. Destructive tier.
+- `get_protect_camera_snapshot(camera_id, channel=None, high_quality=None)`:
+  `GET cameras/{id}/snapshot`. Returns `{"camera_id", "content_type",
+  "size_bytes", "image_base64"}`. Set `channel="package"` for the package
+  camera. It makes no write, but it needs the `write` tier, so a `viewer`
+  token cannot see camera images.
+- `goto_protect_camera_ptz_preset(camera_id, slot, confirm=False, dry_run=False)`:
+  `POST cameras/{id}/ptz/goto/{slot}`. `slot` -1 is the home preset.
+- `start_protect_camera_ptz_patrol(camera_id, slot, confirm=False, dry_run=False)`:
+  `POST cameras/{id}/ptz/patrol/start/{slot}`, `slot` 0 to 4.
+- `stop_protect_camera_ptz_patrol(camera_id, confirm=False, dry_run=False)`:
+  `POST cameras/{id}/ptz/patrol/stop`.
+
+`qualities` holds one or more of `high`, `medium`, `low` and `package`
+(`package` needs a camera with `hasPackageCamera`). An RTSPS URL gives live
+video to anyone who has it, so treat it as a secret. The server does not
+log the URLs. `get_protect_camera_rtsps_streams` makes no write, but it
+needs the `write` tier, so a `viewer` token cannot read the URLs.
+
+```python
+streams = await mcp.call_tool("create_protect_camera_rtsps_stream", {
+    "camera_id": "cam-1", "qualities": ["high"], "confirm": True
+})
 ```
 
 #### NVRs
 
 - `list_protect_nvrs()`
 - `get_protect_nvr(nvr_id)`
+
+`GET nvrs` returns the console's one NVR object (`id`, `modelKey`, `name`,
+`type`, `guid`, `mac`, `doorbellSettings`, `armMode`). `list_protect_nvrs`
+returns it as a one-item list. The API has no `nvrs/{id}` route, so
+`get_protect_nvr` reads `nvrs` and raises a not-found error when `nvr_id`
+does not match.
 
 ```python
 result = await mcp.call_tool("list_protect_nvrs", {})
@@ -795,10 +847,14 @@ Retrieve real-time statistics for a device.
 **Parameters:**
 
 - `site_id` (string, required): Site identifier
-- `device_id` (string, required): Device ID
+- `device_id` (string, required): Device UUID or legacy ObjectId
 
 **Returns:**
-Object containing device statistics.
+Object containing device statistics. A UUID reads the integration route
+`/devices/{id}/statistics/latest` and returns its fields (`uptimeSec`,
+`cpuUtilizationPct`, `memoryUtilizationPct`, `loadAverage1Min`, `uplink`,
+`interfaces.radios`). A legacy ObjectId returns the legacy fields shown
+below.
 
 **Example:**
 
@@ -1242,6 +1298,69 @@ Delete a Dynamic DNS record. Mutating operation; requires `confirm=true` unless
 - `confirm` (boolean/string, required for execution): Set true to apply
 - `dry_run` (boolean/string, optional): Preview without applying
 
+### DNS Policy Tools
+
+DNS policies are local DNS records and forward rules on the gateway. These
+tools use the integration route `/v1/sites/{site}/dns/policies` and require
+`UNIFI_API_TYPE=local`. Read policies with `list_integration_dns_policies` and
+`get_integration_dns_policy`. Verified against the spec and mocks only.
+
+Fields per `policy_type`:
+
+| Type | Required | Optional |
+|------|----------|----------|
+| `A_RECORD` | `ipv4_address` | `ttl_seconds` |
+| `AAAA_RECORD` | `ipv6_address` | `ttl_seconds` |
+| `CNAME_RECORD` | `target_domain` | `ttl_seconds` |
+| `FORWARD_DOMAIN` | `ip_address` (DNS server for the domain) | |
+| `MX_RECORD` | `mail_server_domain`, `priority` | |
+| `SRV_RECORD` | `service`, `protocol`, `server_domain`, `port`, `priority`, `weight` | |
+| `TXT_RECORD` | `text` | |
+
+A field that does not belong to the type raises a validation error.
+
+#### `create_dns_policy`
+
+Create a DNS policy. Mutating operation; requires `confirm=true` unless
+`dry_run=true`.
+
+**Parameters:**
+
+- `site_id` (string, required): Site identifier
+- `policy_type` (string, required): One of the types above
+- `domain` (string, required): Domain the policy answers for
+- `enabled` (boolean, optional): Default true
+- Type fields from the table above
+- `confirm` (boolean/string, required for execution): Set true to apply
+- `dry_run` (boolean/string, optional): Return the payload without sending it
+
+#### `update_dns_policy`
+
+Update a DNS policy. Reads the policy, merges the changes and PUTs the whole
+policy. The type cannot change. A dry run reads the policy and returns the
+merged payload without writing it.
+
+**Parameters:**
+
+- `site_id` (string, required): Site identifier
+- `policy_id` (string, required): Integration policy UUID
+- `enabled`, `domain` (optional)
+- Type fields from the table above (optional)
+- `confirm` (boolean/string, required for execution): Set true to apply
+- `dry_run` (boolean/string, optional): Preview without applying
+
+#### `delete_dns_policy`
+
+Delete a DNS policy. Destructive tier. Requires `confirm=true` unless
+`dry_run=true`.
+
+**Parameters:**
+
+- `site_id` (string, required): Site identifier
+- `policy_id` (string, required): Integration policy UUID
+- `confirm` (boolean/string, required for execution): Set true to apply
+- `dry_run` (boolean/string, optional): Preview without applying
+
 ### Tagged MAC Tools
 
 A tag is a named set of device MAC addresses (`member_table`). The controller
@@ -1513,20 +1632,31 @@ The Site Manager API (`api.ui.com/v1/`) provides cloud-based multi-site manageme
 
 #### `get_isp_metrics`
 
-Get ISP performance metrics for a specific site.
+Get ISP (WAN) metrics for the sites on the UI account. Calls
+`GET /v1/isp-metrics/{interval}`, which returns every site linked to the
+API key. 5-minute data is kept for at least 24 hours, 1-hour data for at
+least 30 days.
 
 **Parameters:**
 
-- `site_id` (string, required): Site identifier
+- `site_id` (string, optional): Keep only entries with this `siteId`
+- `interval` (string, optional): `5m` (default) or `1h`
+- `duration` (string, optional): `24h` for `5m`; `7d` or `30d` for `1h`. Cannot be used with the timestamps.
+- `begin_timestamp` (string, optional): Earliest time, RFC3339
+- `end_timestamp` (string, optional): Latest time, RFC3339
 
 **Returns:**
-ISP metrics including bandwidth, latency, jitter, and packet loss.
+`{"interval", "count", "data"}`. Each entry has `metricType`, `hostId`,
+`siteId` and `periods[]`; each period has `metricTime` and `data.wan`
+(`avgLatency`, `maxLatency`, `download_kbps`, `upload_kbps`, `packetLoss`,
+`uptime`, `downtime`, `ispName`, `ispAsn`).
 
 **Example:**
 
 ```python
 result = await mcp.call_tool("get_isp_metrics", {
-    "site_id": "site-12345"
+    "interval": "1h",
+    "duration": "7d"
 })
 ```
 
@@ -1534,35 +1664,49 @@ result = await mcp.call_tool("get_isp_metrics", {
 
 ```json
 {
-  "site_id": "site-12345",
-  "isp_name": "Example ISP",
-  "download_bandwidth_mbps": 500.0,
-  "upload_bandwidth_mbps": 100.0,
-  "latency_ms": 15.5,
-  "jitter_ms": 2.1,
-  "packet_loss_percent": 0.05,
-  "timestamp": "2026-02-16T12:00:00Z"
+  "interval": "1h",
+  "count": 1,
+  "data": [
+    {
+      "metricType": "1h",
+      "hostId": "host-001",
+      "siteId": "site-12345",
+      "periods": [
+        {
+          "metricTime": "2026-02-16T12:00:00Z",
+          "data": {"wan": {"avgLatency": 15, "download_kbps": 500000, "packetLoss": 0, "ispName": "Example ISP"}}
+        }
+      ]
+    }
+  ]
 }
 ```
 
 #### `query_isp_metrics`
 
-Query ISP metrics with optional filters for time range and site.
+Query ISP metrics for one site. Calls `POST /v1/isp-metrics/{interval}/query`
+with `{"sites": [{"hostId", "siteId", "beginTimestamp", "endTimestamp"}]}`.
 
 **Parameters:**
 
-- `site_id` (string, optional): Site identifier (omit for all sites)
-- `start_time` (string, optional): Start time in ISO format (e.g., "2026-02-01T00:00:00Z")
-- `end_time` (string, optional): End time in ISO format
+- `site_id` (string, required): Site Manager site ID
+- `host_id` (string, required): Console host ID that owns the site (from `list_hosts`)
+- `interval` (string, optional): `5m` (default) or `1h`
+- `start_time` (string, optional): Start time, RFC3339 (e.g., "2026-02-01T00:00:00Z")
+- `end_time` (string, optional): End time, RFC3339
 
 **Returns:**
-List of ISP metrics matching the query.
+`{"interval", "count", "data", "status", "message"}`. `data` has the same
+entries as `get_isp_metrics`. `status` is `partialSuccess` when the account
+can read only some of the sites.
 
 **Example:**
 
 ```python
 result = await mcp.call_tool("query_isp_metrics", {
     "site_id": "site-12345",
+    "host_id": "host-001",
+    "interval": "1h",
     "start_time": "2026-02-01T00:00:00Z",
     "end_time": "2026-02-16T00:00:00Z"
 })
@@ -1570,12 +1714,12 @@ result = await mcp.call_tool("query_isp_metrics", {
 
 #### `list_sdwan_configs`
 
-List all SD-WAN configurations across your organization.
+List all SD-WAN configurations on the account (`GET /v1/sd-wan-configs`).
 
 **Parameters:** None
 
 **Returns:**
-List of SD-WAN configurations with topology type, hub/spoke sites, and status.
+List of configurations, each with `id`, `name` and `type` (`sdwan-hbsp`).
 
 **Example:**
 
@@ -1587,30 +1731,23 @@ result = await mcp.call_tool("list_sdwan_configs", {})
 
 ```json
 [
-  {
-    "config_id": "sdwan-001",
-    "name": "Primary Hub-Spoke",
-    "topology_type": "hub-spoke",
-    "hub_site_ids": ["site-hub"],
-    "spoke_site_ids": ["site-001", "site-002", "site-003"],
-    "failover_enabled": true,
-    "status": "active",
-    "created_at": "2026-01-01T00:00:00Z",
-    "updated_at": "2026-02-01T00:00:00Z"
-  }
+  {"id": "sdwan-001", "name": "Primary Hub-Spoke", "type": "sdwan-hbsp"}
 ]
 ```
 
 #### `get_sdwan_config`
 
-Get detailed SD-WAN configuration by ID.
+Get one SD-WAN configuration (`GET /v1/sd-wan-configs/{id}`).
 
 **Parameters:**
 
 - `config_id` (string, required): Configuration identifier
 
 **Returns:**
-Detailed SD-WAN configuration including topology, sites, and failover settings.
+The configuration: `id`, `name`, `type`, `variant` (`distributed`,
+`failover`, `single`), `settings`, `hubs[]` and `spokes[]` (each with
+`id`, `hostId`, `siteId`, `networkIds`, `routes`, `primaryWan`,
+`wanFailover`).
 
 **Example:**
 
@@ -1622,14 +1759,16 @@ result = await mcp.call_tool("get_sdwan_config", {
 
 #### `get_sdwan_config_status`
 
-Get SD-WAN configuration deployment status.
+Get SD-WAN configuration deployment status
+(`GET /v1/sd-wan-configs/{id}/status`).
 
 **Parameters:**
 
 - `config_id` (string, required): Configuration identifier
 
 **Returns:**
-Deployment status including sites deployed, total sites, and any errors.
+The status: `id`, `fingerprint`, `updatedAt` and `hubs[]` with per-hub
+progress and errors.
 
 **Example:**
 
@@ -1643,53 +1782,72 @@ result = await mcp.call_tool("get_sdwan_config_status", {
 
 ```json
 {
-  "config_id": "sdwan-001",
-  "deployment_status": "deployed",
-  "sites_deployed": 4,
-  "sites_total": 4,
-  "last_deployment_at": "2026-02-15T10:30:00Z",
-  "error_message": null
+  "id": "sdwan-001",
+  "fingerprint": "a1b2c3",
+  "updatedAt": 1771243800000,
+  "hubs": []
 }
 ```
 
 #### `list_hosts`
 
-List all managed UniFi hosts/consoles in your organization.
+List all managed UniFi hosts/consoles in your organization. Uses the
+Site Manager token pagination (`pageSize`, `nextToken`).
 
 **Parameters:**
 
-- `limit` (integer, optional): Maximum number of hosts to return
-- `offset` (integer, optional): Number of hosts to skip (for pagination)
+- `page_size` (integer, optional): Number of hosts per page
+- `next_token` (string, optional): `next_token` from the previous page
 
 **Returns:**
-List of managed hosts with connection status and site counts.
+`{"count", "data", "next_token"}`. `next_token` is null on the last page.
 
 **Example:**
 
 ```python
 result = await mcp.call_tool("list_hosts", {
-    "limit": 50,
-    "offset": 0
+    "page_size": 50
 })
 ```
 
 **Response:**
 
 ```json
-[
-  {
-    "host_id": "host-001",
-    "hostname": "unifi-controller-1",
-    "ip_address": "192.168.1.10",
-    "mac_address": "00:11:22:33:44:55",
-    "model": "UDM-Pro",
-    "version": "3.2.9",
-    "site_count": 3,
-    "status": "online",
-    "last_seen": "2026-02-16T12:00:00Z"
-  }
-]
+{
+  "count": 1,
+  "data": [
+    {
+      "id": "host-001",
+      "hardwareId": "hw-001",
+      "type": "console",
+      "ipAddress": "203.0.113.10",
+      "owner": true,
+      "isBlocked": false,
+      "reportedState": {}
+    }
+  ],
+  "next_token": null
+}
 ```
+
+#### `list_site_manager_devices`
+
+List UniFi devices across every host the API key's account owns or
+super-admins (`GET /v1/devices`). Read-only. Verified against the spec and
+mocks only.
+
+**Parameters:**
+
+- `host_ids` (array, optional): Only these host IDs (sent as `hostIds[]`)
+- `time` (string, optional): Last processed timestamp, RFC 3339
+- `page_size` (integer, optional): Hosts per page
+- `next_token` (string, optional): `next_token` from the previous page
+
+**Returns:**
+`{"count", "device_count", "data", "next_token"}`. Each `data` entry is one
+host with `hostId`, `hostName`, `updatedAt` and `devices` (`id`, `mac`,
+`name`, `model`, `ip`, `productLine`, `status`, `version`, `firmwareStatus`,
+`updateAvailable`).
 
 #### `get_host`
 
@@ -1740,7 +1898,7 @@ result = await mcp.call_tool("get_version_control", {})
 
 #### Cloud Connector passthrough tools
 
-`connector_network_get`, `connector_network_post`, `connector_network_put`, `connector_network_patch`, `connector_network_delete`, and the matching `connector_protect_*` tools forward a request to `https://api.ui.com/v1/connector/consoles/{console_id}/proxy/{network,protect}/{path}`. The `get` tools are `read` tier; the others need `confirm=True`.
+`connector_network_get`, `connector_network_post`, `connector_network_put`, `connector_network_patch`, `connector_network_delete`, and the matching `connector_protect_*` tools forward a request to `https://api.ui.com/v1/connector/consoles/{console_id}/proxy/{network,protect}/{path}`. `connector_network_get` is `read` tier. `connector_protect_get` needs the `write` tier, because it can fetch camera snapshots and stream URLs. The others need `confirm=True`.
 
 **Parameters:** `console_id`, `path`, plus `params` (optional query parameters) on the `get` tools and `body`, **`confirm`** and **`dry_run`** on the mutating tools
 
@@ -2024,6 +2182,93 @@ List all networks assigned to a zone.
 **Returns:**
 Array of network assignments with details.
 
+#### Integration API Firewall Policies
+
+These tools use the integration route
+`/integration/v1/sites/{site}/firewall/policies` (local mode only). They
+take and return integration UUIDs (policy `id`, zone `id` from
+`list_firewall_zones`), not the v2 ObjectIds of `list_firewall_policies`.
+`create_firewall_policy`, `update_firewall_policy` and
+`delete_firewall_policy` still use the v2 route.
+
+##### `list_integration_firewall_policies`
+
+- `site_id` (string, required), `limit`, `offset` (optional)
+- `filter` (string, optional): filter on `id`, `name`, `source.zoneId`,
+  `destination.zoneId` or `metadata.origin`, for example
+  `metadata.origin.eq('USER_DEFINED')`
+
+Returns `{"offset", "limit", "count", "totalCount", "data"}` in the spec
+shape: `action.type` (ALLOW, BLOCK, REJECT) with `allowReturnTraffic`,
+`source`/`destination` with `zoneId` and `trafficFilter`,
+`connectionStateFilter`, `ipsecFilter`, `schedule`, `loggingEnabled`.
+
+##### `get_integration_firewall_policy`
+
+- `site_id`, `policy_id` (string, required)
+
+##### `get_firewall_policy_ordering`
+
+- `site_id`, `source_zone_id`, `destination_zone_id` (string, required)
+
+Returns `{"source_zone_id", "destination_zone_id", "before_system_defined",
+"after_system_defined"}`: user-defined policy UUIDs in evaluation order,
+before and after the built-in policies.
+
+##### `reorder_firewall_policies`
+
+- `site_id`, `source_zone_id`, `destination_zone_id` (string, required)
+- `before_system_defined`, `after_system_defined` (list of policy UUIDs)
+- `confirm`, `dry_run`
+
+`PUT .../firewall/policies/ordering`. Pass every user-defined policy of the
+zone pair; a policy ID may appear once. Destructive tier (admin role),
+because the order decides which policy wins.
+
+##### `set_firewall_policy_logging`
+
+- `site_id`, `policy_id` (string, required), `logging_enabled` (bool)
+- `confirm`, `dry_run`
+
+`PATCH .../firewall/policies/{id}` with `{"loggingEnabled": ...}`. PATCH
+accepts only this field.
+
+```python
+order = await mcp.call_tool("get_firewall_policy_ordering", {
+    "site_id": "default",
+    "source_zone_id": "<internal-zone-uuid>",
+    "destination_zone_id": "<iot-zone-uuid>"
+})
+await mcp.call_tool("reorder_firewall_policies", {
+    "site_id": "default",
+    "source_zone_id": "<internal-zone-uuid>",
+    "destination_zone_id": "<iot-zone-uuid>",
+    "before_system_defined": ["<policy-b>", "<policy-a>"],
+    "confirm": True
+})
+```
+
+#### Zone IDs in the v2 policy tools
+
+`list_firewall_policies`, `create_firewall_policy` and
+`update_firewall_policy` accept a zone as an integration UUID (from
+`list_firewall_zones`), a v2 ObjectId or a zone name. The tools resolve it to
+the v2 `_id`. Some firmware sends no `external_id` on v2 zones, so a UUID is
+matched to its v2 zone by name. `list_firewall_policies` adds
+`source_zone_name` and `destination_zone_name` to each policy.
+
+#### ACL Rule Ordering
+
+`get_acl_rule_ordering` and `reorder_acl_rules` use the integration route
+`/v1/sites/{site}/acl-rules/ordering`. Verified against the spec and mocks
+only.
+
+- `get_acl_rule_ordering(site_id)`: returns `{"site_id",
+  "ordered_acl_rule_ids"}`.
+- `reorder_acl_rules(site_id, ordered_acl_rule_ids, confirm, dry_run)`: sets
+  the order. Pass every user-defined rule UUID once. Write tier, like the
+  other ACL write tools.
+
 #### ZBF Usage Example
 
 ```python
@@ -2076,6 +2321,14 @@ Create a new network/VLAN.
 
 Modify or remove networks. Requires `confirm=True`.
 
+`create_network` and `update_network` take optional IPv6 arguments that map to
+the legacy `networkconf` fields: `ipv6_interface_type` (`none`, `pd` or
+`static`), `ipv6_pd_interface`, `ipv6_pd_prefixid`, `ipv6_ra_enabled`,
+`dhcpv6_enabled`, `dhcpv6_start` and `dhcpv6_stop`. An argument left out keeps
+the stored value. `get_network_details` and `list_vlans` return the IPv6
+fields (`ipv6_*`, `dhcpdv6_*`). The write mapping is verified against mocks
+only.
+
 #### `update_site_to_site_vpn`
 
 Update a site-to-site VPN's `networkconf` entry. Requires `confirm=True`.
@@ -2085,6 +2338,15 @@ Update a site-to-site VPN's `networkconf` entry. Requires `confirm=True`.
 `vpn_id` must be a 24-character hex ObjectId (or a UUID), as returned by `list_site_to_site_vpns`. It is lowercased before use, and anything else raises `ValidationError` before the controller is contacted. `get_site_to_site_vpn` filters the list client-side and does not apply this check.
 
 ### Device Control
+
+#### `remove_device`
+
+Remove (unadopt) a device through the integration route
+`DELETE /v1/sites/{site}/devices/{id}`. An online device is reset to factory
+defaults. Destructive tier. Verified against the spec and mocks only.
+
+**Parameters:** `site_id`, `device_id` (integration UUID), **`confirm`**,
+**`dry_run`**
 
 #### `restart_device`
 
@@ -2117,6 +2379,15 @@ Block or unblock a client from the network.
 Force a client to reconnect.
 
 **Parameters:** `site_id`, `client_mac`, **`confirm`**, **`dry_run`**
+
+#### `unauthorize_guest`
+
+Revoke a guest client's access with the integration action
+`UNAUTHORIZE_GUEST_ACCESS`. Returns `revoked_authorization` from the reply.
+Verified against the spec and mocks only.
+
+**Parameters:** `site_id`, `client_id` (MAC or client UUID), **`confirm`**,
+**`dry_run`**
 
 ### Error Handling
 

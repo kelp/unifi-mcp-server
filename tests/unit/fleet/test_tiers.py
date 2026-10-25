@@ -52,6 +52,7 @@ RISKY_WORDS = (
 #: ``write``: each entry needs a reason.
 RISKY_NAME_EXEMPTIONS = {
     "unblock_client": "restores access rather than removing it",
+    "goto_protect_camera_ptz_preset": "'preset' contains 'reset'; moves a camera to a saved position",
 }
 
 
@@ -133,6 +134,7 @@ FIREWALL_POLICY_TOOLS = (
     "assign_network_to_zone",
     "create_firewall_policy",
     "create_firewall_rule",
+    "reorder_firewall_policies",
     "unassign_network_from_zone",
     "update_firewall_policy",
     "update_firewall_rule",

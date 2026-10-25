@@ -6,7 +6,7 @@ from typing import Any
 
 from ..api import UniFiClient
 from ..config import Settings
-from ..models.diagnostics import NetworkReference, SpeedTestResult
+from ..models.diagnostics import SpeedTestResult
 from ..utils import (
     APIError,
     ValidationError,
@@ -19,44 +19,54 @@ from ..utils import (
     validate_site_id,
 )
 from ..utils.tool_kind import read_tool, write_tool
+from .firewall_zones import _resolve_network_uuid
 
 
 @read_tool
 async def get_network_references(
     site_id: str, network_id: str, settings: Settings
 ) -> dict[str, Any]:
-    """Get references to a network from other resources.
+    """Get the resources that use a network (integration API).
+
+    Each entry has ``resourceType`` (CLIENT, DEVICE, STATIC_ROUTE,
+    OSPF_ROUTE, NEXT_AI, WIFI, NAT_RULE, SD_WAN), ``referenceCount`` and,
+    for types with an API model, ``references`` with ``referenceId`` UUIDs.
+    Check this before you delete a network.
 
     Args:
         site_id: Site identifier
-        network_id: Network identifier
+        network_id: Network UUID, or a legacy ObjectId that is resolved to
+            its UUID
         settings: Application settings
 
     Returns:
-        Dictionary with network reference information
+        {"network_id", "site_id", "total_references", "references"}
     """
     site_id = validate_site_id(site_id)
     logger = get_logger(__name__, settings.log_level)
 
     async with UniFiClient(settings) as client:
-        await client.authenticate()
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        network_uuid = await _resolve_network_uuid(client, settings, site_id, network_id)
 
-        response = await client.get(f"/ea/sites/{site_id}/rest/networkconf/{network_id}/references")
-        data = response.get("data", {}) if isinstance(response, dict) else {}
-        if not isinstance(data, dict):
-            data = {}
-
-        references_data = data.get("referenceResources", []) if isinstance(data, dict) else []
-        references = [NetworkReference(**ref).model_dump() for ref in references_data]
-
-        logger.info(
-            sanitize_log_message(f"Retrieved {len(references)} references for network {network_id}")
+        response = await client.get(
+            settings.get_integration_path(f"sites/{site_uuid}/networks/{network_uuid}/references")
         )
-        return {
-            "network_id": network_id,
-            "site_id": site_id,
-            "references": references,
-        }
+
+    data = response.get("data", response) if isinstance(response, dict) else {}
+    references = data.get("referenceResources", []) if isinstance(data, dict) else []
+    references = [ref for ref in references if isinstance(ref, dict)]
+    total = sum(int(ref.get("referenceCount") or 0) for ref in references)
+
+    logger.info(sanitize_log_message(f"Retrieved {total} references for network {network_uuid}"))
+    return {
+        "network_id": network_uuid,
+        "site_id": site_id,
+        "total_references": total,
+        "references": references,
+    }
 
 
 @write_tool

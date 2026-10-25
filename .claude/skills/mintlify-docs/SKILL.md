@@ -216,7 +216,8 @@ changing one, inspect the code it describes. For this project, that means:
   and call `validate_confirmation()` before any request.
 - **Risk tiers and audit.** `tool_tier()` in `src/tool_registry.py` returns
   `read`, `write` or `destructive`. `delete_`, `remove_` and `bulk_delete_`
-  prefixes and the `DESTRUCTIVE_TOOLS` set are destructive. Every mutating
+  prefixes and the `DESTRUCTIVE_TOOLS` set are destructive. Read tools in
+  `SENSITIVE_READ_TOOLS` (camera media) get `write`. Every mutating
   call is audited by the registry wrapper. Roles in `src/access.py` are
   `viewer`, `operator`, `admin` and `fleet-admin`, mapped to tiers by
   `ROLE_TIERS`.

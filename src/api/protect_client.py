@@ -111,6 +111,9 @@ class ProtectClient:
                     f"Protect API request failed ({response.status_code}): {response.text}"
                 )
 
+            if response.status_code == 204 or not response.content:
+                return None
+
             try:
                 return response.json()
             except Exception as exc:
@@ -119,6 +122,23 @@ class ProtectClient:
             raise
         except Exception as exc:
             raise APIError(f"Unexpected Protect API error: {exc}") from exc
+
+    async def get_bytes(
+        self, endpoint: str, params: dict[str, Any] | None = None
+    ) -> tuple[bytes, str]:
+        """GET a binary reply (for example a camera snapshot).
+
+        Returns:
+            The body and its content type
+        """
+        url = self._build_url(endpoint)
+        try:
+            response = await self.client.request("GET", url, params=params)
+        except Exception as exc:
+            raise APIError(f"Unexpected Protect API error: {exc}") from exc
+        if response.status_code >= 400:
+            raise APIError(f"Protect API request failed ({response.status_code}): {response.text}")
+        return response.content, response.headers.get("content-type", "")
 
     async def get(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
         """Perform a GET request against the Protect API."""

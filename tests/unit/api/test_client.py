@@ -577,6 +577,28 @@ class TestUniFiClientHttpMethods:
         await client.close()
 
     @pytest.mark.asyncio
+    async def test_patch_success(self, mock_settings):
+        """The integration API PATCHes firewall policies (loggingEnabled)."""
+        client = UniFiClient(mock_settings)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"id": "p1"}'
+        mock_response.json = MagicMock(return_value={"id": "p1"})
+
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = mock_response
+            result = await client.patch(
+                "/integration/v1/sites/s/firewall/policies/p1", {"loggingEnabled": True}
+            )
+
+        assert result == {"id": "p1"}
+        args, kwargs = mock_request.call_args
+        assert (args[0] if args else kwargs["method"]) == "PATCH"
+        assert kwargs["json"] == {"loggingEnabled": True}
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_delete_success(self, mock_settings):
         client = UniFiClient(mock_settings)
 

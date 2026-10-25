@@ -410,6 +410,58 @@ class TestAssignNetworkToZone:
             assert kwargs["json_data"]["name"] == "LAN"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("pass_object_id", [False, True])
+    async def test_assign_network_keeps_both_existing_networks(self, mock_settings, pass_object_id):
+        """Gap L4: a zone with 2 networks must PUT all 3, not only the new one.
+
+        Covers the ObjectId path too, where the new network goes through the
+        legacy networkconf UUID lookup.
+        """
+        from src.tools.firewall_zones import assign_network_to_zone
+
+        net_1 = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+        net_2 = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+        net_new = "aaaaaaaa-bbbb-cccc-dddd-000000000003"
+        object_id = "64b000000000000000000003"
+        zone = {"id": "zone-001", "name": "Internal", "networkIds": [net_1, net_2]}
+        networkconf = [
+            {"_id": "64b000000000000000000001", "external_id": net_1},
+            {"_id": object_id, "external_id": net_new},
+        ]
+
+        with (
+            patch("src.tools.firewall_zones.UniFiClient") as mock_client,
+            patch("src.tools.firewall_zones.audit_action", new_callable=AsyncMock),
+        ):
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            mock_instance.is_authenticated = True
+            mock_instance.resolve_site_id = AsyncMock(return_value="site-uuid")
+
+            def get_side_effect(endpoint):
+                if endpoint.endswith("rest/networkconf"):
+                    return {"data": networkconf}
+                if "/networks/" in endpoint:
+                    return {"id": net_new, "name": "IoT"}
+                return {"data": zone}
+
+            mock_instance.get = AsyncMock(side_effect=get_side_effect)
+            mock_instance.put = AsyncMock(return_value={})
+
+            await assign_network_to_zone(
+                "default",
+                "zone-001",
+                object_id if pass_object_id else net_new,
+                mock_settings,
+                confirm=True,
+            )
+
+        mock_instance.put.assert_awaited_once_with(
+            "/integration/v1/sites/site-uuid/firewall/zones/zone-001",
+            json_data={"networkIds": [net_1, net_2, net_new], "name": "Internal"},
+        )
+
+    @pytest.mark.asyncio
     async def test_assign_network_to_zone_already_assigned(self, mock_settings):
         from src.tools.firewall_zones import assign_network_to_zone
 

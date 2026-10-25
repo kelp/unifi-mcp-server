@@ -1,6 +1,7 @@
 """Firewall policies management tools for UniFi v2 API."""
 
 import asyncio
+import re
 from typing import Any, Literal
 
 from ..api.client import UniFiClient
@@ -9,13 +10,14 @@ from ..models.firewall_policy import FirewallPolicy, FirewallPolicyCreate, Firew
 from ..utils import (
     APIError,
     ResourceNotFoundError,
+    ValidationError,
     get_logger,
     log_audit,
     sanitize_log_message,
     validate_site_id,
 )
 from ..utils.tool_kind import read_tool, write_tool
-from ..utils.validators import coerce_bool, validate_limit_offset
+from ..utils.validators import coerce_bool, validate_confirmation, validate_limit_offset
 
 logger = get_logger(__name__)
 
@@ -24,6 +26,8 @@ logger = get_logger(__name__)
 # UUIDs as `external_id`. This cache maps both the external UUID, zone name,
 # and zone_key to the internal ObjectId, populated on demand.
 _zone_cache: dict[str, dict[str, str]] = {}
+# site -> {internal zone _id: zone name}, filled with _zone_cache.
+_zone_names: dict[str, dict[str, str]] = {}
 
 _VALID_IP_VERSIONS = ("IPV4", "IPV6", "BOTH")
 _VALID_PORT_MATCHING_TYPES = ("ANY", "SPECIFIC", "OBJECT")
@@ -251,10 +255,13 @@ async def _load_zone_index(client: UniFiClient, settings: Settings, site_id: str
     zones = _extract_zone_list(response)
 
     index: dict[str, str] = {}
+    names: dict[str, str] = {}
     for zone in zones:
         internal_id = zone.get("_id")
         if not internal_id:
             continue
+        if zone.get("name"):
+            names[internal_id] = zone["name"]
         # Index the internal _id as itself so callers that already know the
         # ObjectId continue to work.
         index[internal_id] = internal_id
@@ -265,7 +272,28 @@ async def _load_zone_index(client: UniFiClient, settings: Settings, site_id: str
         if zone_key := zone.get("zone_key"):
             index[zone_key.lower()] = internal_id
     _zone_cache[site_id] = index
+    _zone_names[site_id] = names
     return index
+
+
+_UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+async def _integration_zone_name(
+    client: UniFiClient, settings: Settings, site_id: str, zone_uuid: str
+) -> str | None:
+    """Return the name of the integration-API zone with this UUID, or None."""
+    try:
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.get(
+            settings.get_integration_path(f"sites/{site_uuid}/firewall/zones")
+        )
+    except APIError:
+        return None
+    for zone in _extract_zone_list(response):
+        if str(zone.get("id", "")).lower() == zone_uuid and zone.get("name"):
+            return str(zone["name"])
+    return None
 
 
 async def _resolve_zone_id(
@@ -290,6 +318,15 @@ async def _resolve_zone_id(
         return index[identifier]
     if lowered in index:
         return index[lowered]
+    # Some firmware (UCG Fiber, Network 10.6.106) sends no external_id on the
+    # v2 zones, so a UUID from list_firewall_zones is not in the index. Find
+    # the integration zone with that UUID and match by name, which is unique
+    # per site.
+    if _UUID_PATTERN.match(lowered):
+        name = await _integration_zone_name(client, settings, site_id, lowered)
+        if name and name.lower() in index:
+            index[identifier] = index[name.lower()]
+            return index[identifier]
     known_internal_ids = sorted(set(index.values()))
     raise ValueError(
         f"Could not resolve firewall zone '{identifier}'. Pass a zone name "
@@ -392,8 +429,10 @@ async def list_firewall_policies(
         limit: Maximum number of policies to return. When omitted, all matching
             policies are returned.
         offset: Number of policies to skip (only applied when limit is provided)
-        source_zone_id: Filter to policies with this source zone ID
-        destination_zone_id: Filter to policies with this destination zone ID
+        source_zone_id: Filter to policies with this source zone: a zone
+            name (e.g. "Internal"), external UUID or internal ObjectId
+        destination_zone_id: Filter to policies with this destination zone
+            (same identifiers as source_zone_id)
 
     Returns:
         List of firewall policy objects
@@ -423,7 +462,16 @@ async def list_firewall_policies(
 
         all_policies = [FirewallPolicy(**policy).model_dump() for policy in policies_data]
 
-        # Apply zone filters before pagination
+        # Apply zone filters before pagination. Policies carry the internal
+        # zone _id, so resolve a name or external UUID first.
+        if source_zone_id is not None:
+            source_zone_id = await _resolve_zone_id(
+                client, settings, normalized_site_id, source_zone_id
+            )
+        if destination_zone_id is not None:
+            destination_zone_id = await _resolve_zone_id(
+                client, settings, normalized_site_id, destination_zone_id
+            )
         if source_zone_id is not None:
             all_policies = [
                 p for p in all_policies if p.get("source", {}).get("zone_id") == source_zone_id
@@ -434,6 +482,20 @@ async def list_firewall_policies(
                 for p in all_policies
                 if p.get("destination", {}).get("zone_id") == destination_zone_id
             ]
+
+        # Add zone names when the v2 zone list is available (cached per site).
+        names = _zone_names.get(normalized_site_id)
+        if names is None:
+            try:
+                await _load_zone_index(client, settings, normalized_site_id)
+            except APIError:
+                pass
+            names = _zone_names.get(normalized_site_id, {})
+        for p in all_policies:
+            source_zone = str((p.get("source") or {}).get("zone_id") or "")
+            destination_zone = str((p.get("destination") or {}).get("zone_id") or "")
+            p["source_zone_name"] = names.get(source_zone)
+            p["destination_zone_name"] = names.get(destination_zone)
 
         # Only paginate when the caller explicitly requests it
         if limit is not None or offset is not None:
@@ -598,7 +660,8 @@ async def create_firewall_policy(
         description: Optional description
         ip_version: IPV4, IPV6, or BOTH (required by API; defaults to BOTH)
         create_allow_respond: When True, automatically create a paired ALLOW
-            RESPOND rule for stateful TCP/UDP sessions.
+            RESPOND rule for stateful TCP/UDP sessions. ALLOW only. Default
+            False: the controller rejects it for Gateway destinations.
         icmp_typename: ICMP type name filter (e.g. "ANY", "echo"). Only
             meaningful when ``protocol`` is ``icmpv6`` or similar.
         icmp_v6_typename: ICMPv6 type name filter (e.g. "ANY", "echo-request").
@@ -627,6 +690,8 @@ async def create_firewall_policy(
     action_upper = action.upper()
     if action_upper not in valid_actions:
         raise ValueError(f"Invalid action '{action}'. Must be one of: {valid_actions}")
+    if create_allow_respond and action_upper != "ALLOW":
+        raise ValueError("create_allow_respond=True is valid only with action ALLOW")
 
     ip_version_upper = ip_version.upper()
     if ip_version_upper not in _VALID_IP_VERSIONS:
@@ -717,13 +782,10 @@ async def create_firewall_policy(
             # `ip_version`; the API 400s (with an obfuscated Spring error)
             # if either is omitted. Default to an always-on rule.
             #
-            # create_allow_respond must be False for BLOCK rules — the API
-            # rejects BLOCK + respond-traffic enabled. Auto-set when the
-            # caller doesn't specify.
-            if create_allow_respond is None:
-                resolved_allow_respond = action_upper != "BLOCK"
-            else:
-                resolved_allow_respond = create_allow_respond
+            # A respond rule (integration allowReturnTraffic) is valid on ALLOW
+            # only, and the controller rejects it for Gateway destinations, so
+            # it is off unless the caller asks for it.
+            resolved_allow_respond = bool(create_allow_respond)
 
             policy_data = FirewallPolicyCreate(
                 name=name,
@@ -1345,3 +1407,293 @@ async def get_zone_policy_matrix(
                 "Use policy names and zone names to correlate manually."
             ),
         }
+
+
+# ---------------------------------------------------------------------------
+# Integration API firewall policies (gaps N3, N4)
+#
+# These tools use /integration/v1/sites/{site}/firewall/policies. IDs here
+# are integration UUIDs (policy ``id``, zone ``id`` from list_firewall_zones),
+# not the v2 ObjectIds that list_firewall_policies returns.
+# ---------------------------------------------------------------------------
+
+
+def _integration_policies_path(settings: Settings, site_uuid: str, suffix: str = "") -> str:
+    return settings.get_integration_path(f"sites/{site_uuid}/firewall/policies{suffix}")
+
+
+def _zone_pair_params(source_zone_id: str, destination_zone_id: str) -> dict[str, str]:
+    source = (source_zone_id or "").strip()
+    destination = (destination_zone_id or "").strip()
+    if not source or not destination:
+        raise ValidationError("source_zone_id and destination_zone_id are required")
+    return {"sourceFirewallZoneId": source, "destinationFirewallZoneId": destination}
+
+
+@read_tool
+async def list_integration_firewall_policies(
+    site_id: str,
+    settings: Settings,
+    limit: int | None = None,
+    offset: int | None = None,
+    filter: str | None = None,
+) -> dict[str, Any]:
+    """List zone-based firewall policies through the integration API.
+
+    Returns the spec shape, which the v2 list does not: ``action.type``
+    (ALLOW, BLOCK, REJECT) with ``allowReturnTraffic``, ``source`` and
+    ``destination`` with ``zoneId`` and ``trafficFilter``,
+    ``connectionStateFilter``, ``ipsecFilter``, ``schedule`` and
+    ``loggingEnabled``.
+
+    Args:
+        site_id: Site identifier
+        settings: Application settings
+        limit: Maximum number of policies to return (1-1000)
+        offset: Number of policies to skip
+        filter: Integration filter expression on ``id``, ``name``,
+            ``source.zoneId``, ``destination.zoneId`` or ``metadata.origin``,
+            e.g. ``metadata.origin.eq('USER_DEFINED')``
+
+    Returns:
+        Paginated list of policies with integration UUIDs
+    """
+    _ensure_local_api(settings)
+    site_id = validate_site_id(site_id)
+    final_limit, final_offset = validate_limit_offset(limit, offset)
+    params: dict[str, Any] = {"limit": final_limit, "offset": final_offset}
+    if filter:
+        params["filter"] = filter
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.get(_integration_policies_path(settings, site_uuid), params=params)
+
+    if isinstance(response, dict):
+        data = response.get("data") or []
+        count = response.get("count", len(data))
+        total_count = response.get("totalCount", len(data))
+    else:
+        data = response if isinstance(response, list) else []
+        count = total_count = len(data)
+    return {
+        "offset": final_offset,
+        "limit": final_limit,
+        "count": count,
+        "totalCount": total_count,
+        "data": data,
+    }
+
+
+@read_tool
+async def get_integration_firewall_policy(
+    site_id: str, policy_id: str, settings: Settings
+) -> dict[str, Any]:
+    """Get one zone-based firewall policy through the integration API.
+
+    Args:
+        site_id: Site identifier
+        policy_id: Integration policy UUID (from list_integration_firewall_policies)
+        settings: Application settings
+
+    Returns:
+        The policy in the integration spec shape
+    """
+    _ensure_local_api(settings)
+    site_id = validate_site_id(site_id)
+    policy_id = (policy_id or "").strip()
+    if not policy_id:
+        raise ValidationError("policy_id is required")
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.get(
+            _integration_policies_path(settings, site_uuid, f"/{policy_id}")
+        )
+
+    if isinstance(response, dict) and isinstance(response.get("data"), dict):
+        return dict(response["data"])
+    return response if isinstance(response, dict) else {}
+
+
+def _ordering_result(
+    response: Any, source_zone_id: str, destination_zone_id: str
+) -> dict[str, Any]:
+    ordered = response.get("orderedFirewallPolicyIds", {}) if isinstance(response, dict) else {}
+    return {
+        "source_zone_id": source_zone_id,
+        "destination_zone_id": destination_zone_id,
+        "before_system_defined": list(ordered.get("beforeSystemDefined") or []),
+        "after_system_defined": list(ordered.get("afterSystemDefined") or []),
+    }
+
+
+@read_tool
+async def get_firewall_policy_ordering(
+    site_id: str,
+    source_zone_id: str,
+    destination_zone_id: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Get the order of user-defined firewall policies for one zone pair.
+
+    Policies are evaluated in order. ``before_system_defined`` run before the
+    built-in policies, ``after_system_defined`` after them.
+
+    Args:
+        site_id: Site identifier
+        source_zone_id: Source zone UUID (from list_firewall_zones)
+        destination_zone_id: Destination zone UUID
+        settings: Application settings
+
+    Returns:
+        {"source_zone_id", "destination_zone_id", "before_system_defined",
+        "after_system_defined"} with integration policy UUIDs
+    """
+    _ensure_local_api(settings)
+    site_id = validate_site_id(site_id)
+    params = _zone_pair_params(source_zone_id, destination_zone_id)
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.get(
+            _integration_policies_path(settings, site_uuid, "/ordering"), params=params
+        )
+
+    return _ordering_result(
+        response, params["sourceFirewallZoneId"], params["destinationFirewallZoneId"]
+    )
+
+
+@write_tool
+async def reorder_firewall_policies(
+    site_id: str,
+    source_zone_id: str,
+    destination_zone_id: str,
+    settings: Settings,
+    before_system_defined: list[str] | None = None,
+    after_system_defined: list[str] | None = None,
+    confirm: bool | str = False,
+    dry_run: bool | str = False,
+) -> dict[str, Any]:
+    """Set the order of user-defined firewall policies for one zone pair.
+
+    Changes which policy wins when several match, so it can open or close
+    traffic. Read the current order with get_firewall_policy_ordering first
+    and pass every user-defined policy of the zone pair.
+
+    Args:
+        site_id: Site identifier
+        source_zone_id: Source zone UUID (from list_firewall_zones)
+        destination_zone_id: Destination zone UUID
+        settings: Application settings
+        before_system_defined: Policy UUIDs to run before the built-in policies, in order
+        after_system_defined: Policy UUIDs to run after the built-in policies, in order
+        confirm: Must be true to apply (required unless dry_run)
+        dry_run: Preview the request without sending it
+
+    Returns:
+        The new order, in the get_firewall_policy_ordering shape
+    """
+    validate_confirmation(confirm, "reorder firewall policies", dry_run)
+    _ensure_local_api(settings)
+    site_id = validate_site_id(site_id)
+    params = _zone_pair_params(source_zone_id, destination_zone_id)
+
+    before = list(before_system_defined or [])
+    after = list(after_system_defined or [])
+    combined = before + after
+    if not combined:
+        raise ValidationError(
+            "Pass at least one policy ID in before_system_defined or after_system_defined"
+        )
+    if len(set(combined)) != len(combined):
+        raise ValidationError("A policy ID appears more than once in the new order")
+
+    payload = {
+        "orderedFirewallPolicyIds": {"beforeSystemDefined": before, "afterSystemDefined": after}
+    }
+    if coerce_bool(dry_run):
+        return {
+            "dry_run": True,
+            "operation": "reorder_firewall_policies",
+            "params": params,
+            "payload": payload,
+        }
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.put(
+            _integration_policies_path(settings, site_uuid, "/ordering"),
+            json_data=payload,
+            params=params,
+        )
+
+    logger.info(sanitize_log_message(f"Reordered firewall policies on site {site_id}"))
+    return _ordering_result(
+        response, params["sourceFirewallZoneId"], params["destinationFirewallZoneId"]
+    )
+
+
+@write_tool
+async def set_firewall_policy_logging(
+    site_id: str,
+    policy_id: str,
+    logging_enabled: bool,
+    settings: Settings,
+    confirm: bool | str = False,
+    dry_run: bool | str = False,
+) -> dict[str, Any]:
+    """Turn logging on or off for one firewall policy (integration PATCH).
+
+    PATCH accepts only ``loggingEnabled``; it does not change what the
+    policy allows or blocks.
+
+    Args:
+        site_id: Site identifier
+        policy_id: Integration policy UUID (from list_integration_firewall_policies)
+        logging_enabled: True to log matched traffic
+        settings: Application settings
+        confirm: Must be true to apply (required unless dry_run)
+        dry_run: Preview the request without sending it
+
+    Returns:
+        The updated policy in the integration spec shape
+    """
+    validate_confirmation(confirm, "set firewall policy logging", dry_run)
+    _ensure_local_api(settings)
+    site_id = validate_site_id(site_id)
+    policy_id = (policy_id or "").strip()
+    if not policy_id:
+        raise ValidationError("policy_id is required")
+
+    payload = {"loggingEnabled": coerce_bool(logging_enabled)}
+    if coerce_bool(dry_run):
+        return {
+            "dry_run": True,
+            "operation": "set_firewall_policy_logging",
+            "policy_id": policy_id,
+            "payload": payload,
+        }
+
+    async with UniFiClient(settings) as client:
+        if not client.is_authenticated:
+            await client.authenticate()
+        site_uuid = await client.resolve_site_id(site_id)
+        response = await client.patch(
+            _integration_policies_path(settings, site_uuid, f"/{policy_id}"),
+            json_data=payload,
+        )
+
+    logger.info(sanitize_log_message(f"Set logging={payload['loggingEnabled']} on {policy_id}"))
+    if isinstance(response, dict) and isinstance(response.get("data"), dict):
+        return dict(response["data"])
+    return response if isinstance(response, dict) else {}
