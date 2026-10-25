@@ -226,3 +226,6 @@ bandit-report.json
 # Ansible deploy (deploy/ansible): secrets and downloaded collections
 deploy/ansible/inventories/*/group_vars/all/vault.yml
 deploy/ansible/collections/
+
+# Local git worktrees made by Claude Code agents
+.claude/worktrees/
